@@ -69,7 +69,7 @@ class RhoFold(nn.Module):
 
         return output
 
-    def forward_one_cycle(self, tokens, rna_fm_tokens, recycling_inputs, seq):
+    def forward_one_cycle(self, tokens, rna_fm_tokens, recycling_inputs, seq, trunk_only=True):
         '''
         Args:
             tokens: [bs, seq_len, c_z]
@@ -115,6 +115,7 @@ class RhoFold(nn.Module):
                 tokens,
                 rna_fm_tokens,
                 seq,
+                trunk_only=True,
                 **kwargs):
 
         """Perform the forward pass.
@@ -127,9 +128,13 @@ class RhoFold(nn.Module):
         recycling_inputs = None
 
         outputs = []
+        single_fea = None
+        pair_fea = None
         for _r in range(self.config.model.recycling_embedder.recycles):
             output, recycling_inputs = \
                 self.forward_one_cycle(tokens, rna_fm_tokens, recycling_inputs, seq)
             outputs.append(output)
+            single_fea = recycling_inputs['single_fea']
+            pair_fea = recycling_inputs['pair_fea']
 
-        return outputs
+        return outputs, single_fea, pair_fea
