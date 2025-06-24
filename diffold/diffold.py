@@ -165,7 +165,7 @@ class Diffold(nn.Module):
         """设置为推理模式"""
         self.eval()
 
-    def forward(self, tokens, rna_fm_tokens, seq, target_coords=None, **kwargs):
+    def forward(self, tokens, rna_fm_tokens, seq, target_coords=None, missing_atom_mask=None, **kwargs):
         # 确保RhoFold前向传播时不计算梯度
         try:
             with torch.no_grad():
@@ -192,9 +192,6 @@ class Diffold(nn.Module):
                 # 返回一个模拟的损失用于测试
                 dummy_loss = torch.tensor(1.0, device=tokens.device, requires_grad=True)
                 return dummy_loss, None, None
-            else:
-                # 推理模式，返回RhoFold的结构预测
-                return outputs, single_fea, pair_fea
 
         # 如果有目标坐标，继续diffusion训练
         af_in, atom_mask = process_alphafold3_input(
@@ -220,8 +217,8 @@ class Diffold(nn.Module):
             af_in.molecule_ids = af_in.molecule_ids.to(device)
         if af_in.atom_parent_ids is not None:
             af_in.atom_parent_ids = af_in.atom_parent_ids.to(device)
-        if af_in.missing_atom_mask is not None:
-            af_in.missing_atom_mask = af_in.missing_atom_mask.to(device)
+        if missing_atom_mask is not None:
+            af_in.missing_atom_mask = missing_atom_mask.to(device)
         if af_in.additional_molecule_feats is not None:
             af_in.additional_molecule_feats = af_in.additional_molecule_feats.to(device)
         if af_in.is_molecule_types is not None:

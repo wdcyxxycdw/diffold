@@ -16,13 +16,7 @@ def lens_to_mask(lens: torch.Tensor, max_len: Optional[int] = None) -> torch.Ten
     return arange < lens.unsqueeze(-1)
 
 def process_alphafold3_input(
-    proteins: Optional[List[str]] = None,
-    ss_dna: Optional[List[str]] = None,
     ss_rna: Optional[List[str]] = None,
-    ds_dna: Optional[List[str]] = None,
-    ds_rna: Optional[List[str]] = None,
-    ligands: Optional[List[str]] = None,
-    metal_ions: Optional[List[str]] = None,
     atom_pos: Optional[List[torch.Tensor]] = None,
     atoms_per_window: int = 27,
     add_atom_ids: bool = False,
@@ -89,23 +83,11 @@ def process_alphafold3_input(
     """
     
     # 设置默认值
-    proteins = proteins or []
-    ss_dna = ss_dna or []
     ss_rna = ss_rna or []
-    ds_dna = ds_dna or []
-    ds_rna = ds_rna or []
-    ligands = ligands or []
-    metal_ions = metal_ions or []
     
     # 创建Alphafold3Input对象
     alphafold3_input = Alphafold3Input(
-        proteins=proteins,
-        ss_dna=ss_dna,
         ss_rna=ss_rna,
-        ds_dna=ds_dna,
-        ds_rna=ds_rna,
-        ligands=ligands,
-        metal_ions=metal_ions,
         atom_pos=atom_pos,
         add_atom_ids=add_atom_ids,
         add_atompair_ids=add_atompair_ids,
@@ -156,9 +138,7 @@ def process_multiple_alphafold3_inputs(
     
     示例:
         inputs = [
-            {'proteins': ['AG'], 'ligands': ['CCO']},
-            {'proteins': ['MLEI'], 'ss_rna': ['ACGU']},
-            {'proteins': ['GAVL']}
+            {'ss_rna': ['ACGU', 'ACGU'], 'atom_pos': [torch.randn(120, 3), torch.randn(120, 3)]}
         ]
         batch_input = process_multiple_alphafold3_inputs(inputs)
         
@@ -172,13 +152,7 @@ def process_multiple_alphafold3_inputs(
     
     for input_dict in input_list:
         alphafold3_input = Alphafold3Input(
-            proteins=input_dict.get('proteins', []),
-            ss_dna=input_dict.get('ss_dna', []),
             ss_rna=input_dict.get('ss_rna', []),
-            ds_dna=input_dict.get('ds_dna', []),
-            ds_rna=input_dict.get('ds_rna', []),
-            ligands=input_dict.get('ligands', []),
-            metal_ions=input_dict.get('metal_ions', []),
             atom_pos=input_dict.get('atom_pos'),
             add_atom_ids=input_dict.get('add_atom_ids', False),
             add_atompair_ids=input_dict.get('add_atompair_ids', False),
@@ -186,8 +160,7 @@ def process_multiple_alphafold3_inputs(
             custom_atoms=input_dict.get('custom_atoms'),
             custom_bonds=input_dict.get('custom_bonds'),
             **{k: v for k, v in input_dict.items() if k not in [
-                'proteins', 'ss_dna', 'ss_rna', 'ds_dna', 'ds_rna', 
-                'ligands', 'metal_ions', 'atom_pos', 'add_atom_ids', 
+                'ss_rna', 'atom_pos', 'add_atom_ids', 
                 'add_atompair_ids', 'directed_bonds', 'custom_atoms', 'custom_bonds'
             ]}
         )
@@ -276,56 +249,9 @@ def print_input_summary(batched_input: BatchedAtomInput, atom_mask: Optional[tor
         print(f"{key}: {shape}")
 
 
-# 示例使用函数
-def example_usage():
-    """展示如何使用这些函数的示例"""
-    
-    print("=== 示例1: 简单蛋白质输入 ===")
-    result = process_alphafold3_input(
-        proteins=['AG']
-    )
-    # 确保result是BatchedAtomInput类型
-    if isinstance(result, BatchedAtomInput):
-        print_input_summary(result)
-    
-    print("\n=== 示例2: 带坐标和atom_mask的输入 ===")
-    mock_atompos = [
-        torch.randn(5, 3),  # 丙氨酸
-        torch.randn(4, 3)   # 甘氨酸
-    ]
-    result = process_alphafold3_input(
-        proteins=['AG'],
-        atom_pos=mock_atompos,
-    )
-    if isinstance(result, tuple):
-        batch_input, atom_mask = result
-        print_input_summary(batch_input, atom_mask)
-        print(atom_mask)
-    
-    print("\n=== 示例3: 多种分子类型 ===")
-    result = process_alphafold3_input(
-        proteins=['MLEI'],
-        ss_rna=['ACGU'],
-        ligands=['CCO'],
-        metal_ions=['Na'],
-    )
-    if isinstance(result, tuple):
-        batch_input, atom_mask = result
-        print_input_summary(batch_input, atom_mask)
-    
-    print("\n=== 示例4: 批量处理多个输入 ===")
-    inputs = [
-        {'proteins': ['AG']},
-        {'proteins': ['MLEI'], 'ligands': ['CCO']},
-        {'proteins': ['GAVL'], 'ss_rna': ['ACGU']}
-    ]
-    result = process_multiple_alphafold3_inputs(
-        inputs
-    )
-    if isinstance(result, tuple):
-        batch_input, atom_mask = result
-        print_input_summary(batch_input, atom_mask)
-
 
 if __name__ == "__main__":
-    example_usage() 
+    af_input = process_alphafold3_input(
+        ss_rna=['ACGU'],
+        atom_pos=[torch.randn(120, 3)]
+    )
