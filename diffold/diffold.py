@@ -172,8 +172,10 @@ class Diffold(nn.Module):
                 outputs, single_fea, pair_fea = self.rhofold(tokens, rna_fm_tokens, seq, **kwargs)
         except Exception as e:
             print(f"⚠️ RhoFold前向传播失败: {e}")
+            import traceback
+            traceback.print_exc()
             exit()
-        
+            
         # 如果需要梯度用于后续计算，可以detach并重新设置requires_grad
         if single_fea is not None:
             single_fea = single_fea.detach()
@@ -188,15 +190,23 @@ class Diffold(nn.Module):
         # 如果没有目标坐标且在训练模式，返回RhoFold的输出用于测试
         if target_coords is None:
             if self.training:
-                print("⚠️ 训练模式但没有目标坐标，返回模拟损失")
-                # 返回一个模拟的损失用于测试
-                dummy_loss = torch.tensor(1.0, device=tokens.device, requires_grad=True)
-                return dummy_loss, None, None
+                print("⚠️ 训练模式但没有目标坐标")
+                return None, None, None
 
+        print("RhoFold输出:", single_fea.shape, pair_fea.shape)
         # 如果有目标坐标，继续diffusion训练
         af_in, atom_mask = process_alphafold3_input(
             ss_rna=[seq],
             atom_pos=target_coords,
+        )
+
+        print("AlphaFold3输入:",
+            "atom_inputs", af_in.atom_inputs.shape,
+            "atompair_inputs", af_in.atompair_inputs.shape,
+            "additional_token_feats", af_in.additional_token_feats.shape,
+            "molecule_atom_lens", af_in.molecule_atom_lens.shape,
+            "molecule_ids", af_in.molecule_ids.shape,
+            "atom_mask", atom_mask.shape
         )
 
         # 获取设备信息并将所有输入数据移动到正确的设备
@@ -218,7 +228,7 @@ class Diffold(nn.Module):
         if af_in.atom_parent_ids is not None:
             af_in.atom_parent_ids = af_in.atom_parent_ids.to(device)
         if missing_atom_mask is not None:
-            af_in.missing_atom_mask = missing_atom_mask.to(device)
+            missing_atom_mask = missing_atom_mask.to(device)
         if af_in.additional_molecule_feats is not None:
             af_in.additional_molecule_feats = af_in.additional_molecule_feats.to(device)
         if af_in.is_molecule_types is not None:
@@ -245,12 +255,20 @@ class Diffold(nn.Module):
 
         if self.training:
             mask = af_in.molecule_atom_lens > 0
+
+            batch_num=af_in.atom_pos.shape[0]
+            padded_atom_num=af_in.atom_pos.shape[1]
+            real_atom_num=missing_atom_mask.shape[1]
+            if padded_atom_num > real_atom_num:    
+                missing_atom_mask = torch.cat([missing_atom_mask, torch.zeros(batch_num, padded_atom_num - real_atom_num, device=missing_atom_mask.device, dtype=missing_atom_mask.dtype)], dim=1)
+
+                        
             relative_position_encoding = self.relative_position_encoding(
                 additional_molecule_feats = af_in.additional_molecule_feats,
             )
             
             diffusion_loss, denoised_atom_pos, diffusion_loss_breakdown, _ = self.edm(
-                atom_pos_ground_truth = target_coords,
+                atom_pos_ground_truth = af_in.atom_pos,
                 additional_molecule_feats = af_in.additional_molecule_feats,
                 is_molecule_types = af_in.is_molecule_types,
                 add_smooth_lddt_loss = False,
@@ -258,7 +276,7 @@ class Diffold(nn.Module):
                 atom_feats = atom_feats,
                 atompair_feats = atompair_feats,
                 atom_parent_ids = af_in.atom_parent_ids,
-                missing_atom_mask = af_in.missing_atom_mask,
+                missing_atom_mask = missing_atom_mask,
                 atom_mask = atom_mask,
                 mask = mask,
                 single_trunk_repr = single_fea,
@@ -271,7 +289,6 @@ class Diffold(nn.Module):
                 return_denoised_pos = True,
                 nucleotide_loss_weight = self.nucleotide_loss_weight,
                 ligand_loss_weight = self.ligand_loss_weight,
-                verbose = True,
             )
             return diffusion_loss, denoised_atom_pos, diffusion_loss_breakdown
         else:

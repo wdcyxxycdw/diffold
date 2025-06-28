@@ -1,5 +1,6 @@
 import torch
 from typing import List, Optional, Tuple, Union
+from copy import deepcopy
 from alphafold3_pytorch.inputs import (
     Alphafold3Input, 
     alphafold3_inputs_to_batched_atom_input,
@@ -14,6 +15,7 @@ def lens_to_mask(lens: torch.Tensor, max_len: Optional[int] = None) -> torch.Ten
         max_len = int(lens.amax().item())
     arange = torch.arange(max_len, device=device)
     return arange < lens.unsqueeze(-1)
+
 
 def process_alphafold3_input(
     ss_rna: Optional[List[str]] = None,
@@ -44,41 +46,24 @@ def process_alphafold3_input(
         directed_bonds: 是否使用有向键
         custom_atoms: 自定义原子类型列表
         custom_bonds: 自定义键类型列表
-        return_atom_mask: 是否同时返回atom_mask
+        remove_extra_oxygens: 是否删除额外的氧原子以匹配RhoFold格式
         **kwargs: 其他传递给Alphafold3Input的参数
     
     返回:
         BatchedAtomInput: 预处理后的批量原子输入对象
-        或者 (BatchedAtomInput, atom_mask): 如果return_atom_mask=True
+        atom_mask: 原子掩码张量
     
     示例:
-        # 简单蛋白质输入
-        batch_input = process_alphafold3_input(
-            proteins=['AG', 'MLEI']
-        )
-        
-        # 带坐标的输入
-        mock_atompos = [
-            torch.randn(5, 3),  # 丙氨酸5个原子
-            torch.randn(4, 3)   # 甘氨酸4个原子
-        ]
-        batch_input = process_alphafold3_input(
-            proteins=['AG'],
-            atom_pos=mock_atompos
-        )
-        
-        # 多种分子类型
-        batch_input = process_alphafold3_input(
-            proteins=['MLEI'],
-            ss_rna=['ACGU'],
-            ligands=['CCO'],
-            metal_ions=['Na']
-        )
-        
-        # 同时返回atom_mask
+        # 处理RNA输入并自动删除额外氧原子
         batch_input, atom_mask = process_alphafold3_input(
-            proteins=['AG'],
-            return_atom_mask=True
+            ss_rna=['AGUC'],
+            remove_extra_oxygens=True
+        )
+        
+        # 保持原始AlphaFold3格式
+        batch_input, atom_mask = process_alphafold3_input(
+            ss_rna=['AGUC'],
+            remove_extra_oxygens=False
         )
     """
     
@@ -103,7 +88,6 @@ def process_alphafold3_input(
         atoms_per_window=atoms_per_window
     )
     
-
     # 从molecule_atom_lens计算total_atoms
     molecule_atom_lens = batched_input.molecule_atom_lens
     total_atoms = molecule_atom_lens.sum(dim=-1)
@@ -111,9 +95,54 @@ def process_alphafold3_input(
     # 获取atom_seq_len（原子序列的最大长度）
     atom_seq_len = batched_input.atom_inputs.shape[1]
     
-    # 生成atom_mask
-    atom_mask = lens_to_mask(total_atoms, max_len=atom_seq_len)
+    # 【关键修复】稳健的atom_pos维度处理
+    print(f"原始 atom_pos 维度: {batched_input.atom_pos.shape if batched_input.atom_pos is not None else 'None'}")
     
+    # 检查atom_pos是否存在
+    if batched_input.atom_pos is None:
+        raise ValueError("batched_input.atom_pos 不能为 None")
+    
+    # 确保atom_pos是3维张量 [batch_size, num_atoms, 3]
+    if batched_input.atom_pos.dim() == 4:
+        # 如果是4维，压缩多余的维度
+        if batched_input.atom_pos.shape[0] == 1:
+            batched_input.atom_pos = batched_input.atom_pos.squeeze(0)
+        elif batched_input.atom_pos.shape[1] == 1:
+            batched_input.atom_pos = batched_input.atom_pos.squeeze(1)
+        else:
+            # 如果两个维度都不是1，选择保留最后3个维度
+            batched_input.atom_pos = batched_input.atom_pos.view(-1, batched_input.atom_pos.shape[-2], batched_input.atom_pos.shape[-1])
+    elif batched_input.atom_pos.dim() == 2:
+        # 如果是2维，添加batch维度
+        batched_input.atom_pos = batched_input.atom_pos.unsqueeze(0)
+    elif batched_input.atom_pos.dim() != 3:
+        raise ValueError(f"不支持的atom_pos维度: {batched_input.atom_pos.shape}")
+    
+    print(f"处理后 atom_pos 维度: {batched_input.atom_pos.shape}")
+    
+    # 获取处理后的维度信息
+    atom_num_in_coords = batched_input.atom_pos.shape[1]
+    batch_num = batched_input.atom_pos.shape[0]
+
+    # 生成atom_mask，使用atom_pos的实际原子数量
+    atom_mask = lens_to_mask(total_atoms, max_len=atom_num_in_coords)
+
+    print("atom_pos:", batched_input.atom_pos.shape)
+    print("atom_mask:", atom_mask.shape)
+    
+    # 如果atom_inputs的原子数量大于atom_pos的原子数量，需要填充
+    if atom_seq_len > atom_num_in_coords:
+        print(f"填充 atom_pos: {atom_num_in_coords} -> {atom_seq_len}")
+        padding_atoms = atom_seq_len - atom_num_in_coords
+        batched_input.atom_pos = torch.cat([
+            batched_input.atom_pos, 
+            torch.zeros(batch_num, padding_atoms, 3, device=batched_input.atom_pos.device)
+        ], dim=1)
+        atom_mask = torch.cat([
+            atom_mask, 
+            torch.zeros(batch_num, padding_atoms, device=atom_mask.device, dtype=atom_mask.dtype)
+        ], dim=1)
+
     return batched_input, atom_mask
 
 

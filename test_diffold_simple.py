@@ -111,7 +111,7 @@ def test_model_initialization():
     
     try:
         # Use specified weight path
-        rhofold_checkpoint_path = "/home/yamanashi/RhoFold/pretrained/model_20221010_params.pt"
+        rhofold_checkpoint_path = "/home/wdcyx/rhofold/pretrained/model_20221010_params.pt"
         
         print(f"Initializing Diffold model...")
         print(f"RhoFold weights path: {rhofold_checkpoint_path}")
@@ -125,6 +125,7 @@ def test_model_initialization():
             rhofold_checkpoint_path = None
         
         model = Diffold(rhofold_config, rhofold_checkpoint_path=rhofold_checkpoint_path)
+        model.to("cuda" if torch.cuda.is_available() else "cpu")
         
         print("✓ Model initialization successful")
         

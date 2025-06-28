@@ -1,0 +1,7 @@
+2025-06-25 16:40:16,304 - INFO: Constructing RhoFold
+2025-06-25 16:40:16,940 - INFO:     downloading ./pretrained/model_20221010_params.pt
+2025-06-25 16:40:17,159 - INFO:     loading ./pretrained/model_20221010_params.pt
+2025-06-25 16:40:17,753 - INFO: Input_fas ./example/input/3owzA/3owzA.fasta
+2025-06-25 16:40:17,753 - INFO: Input_a3m ./example/input/3owzA/3owzA.a3m
+2025-06-25 16:40:17,754 - INFO: Started RhoFold Inference
+2025-06-25 16:40:18,279 - INFO:     Inference using device cuda

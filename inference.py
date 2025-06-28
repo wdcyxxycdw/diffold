@@ -83,7 +83,7 @@ def main(config):
                        seq=data_dict['seq'],
                        )
 
-        output = outputs[-1]
+        output = outputs[0][-1]
 
         os.makedirs(config.output_dir, exist_ok=True)
 
@@ -127,14 +127,14 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--device", help="Default cpu. If GPUs are available, you can set --device cuda:<GPU_index> for faster prediction.", default=None)
-    parser.add_argument("--ckpt", help="Path to the pretrained model, default ./pretrained/rhofold_pretrained_params.pt", default='./pretrained/rhofold_pretrained_params.pt')
-    parser.add_argument("--input_fas", help="Path to the input fasta file. Valid nucleic acids in RNA sequence: A, U, G, C", required=True)
+    parser.add_argument("--ckpt", help="Path to the pretrained model, default ./pretrained/rhofold_pretrained_params.pt", default='./pretrained/model_20221010_params.pt')
+    parser.add_argument("--input_fas", help="Path to the input fasta file. Valid nucleic acids in RNA sequence: A, U, G, C", default='./example/input/3owzA/3owzA.fasta')
     parser.add_argument("--input_a3m", help="Path to the input msa file. Default None."
-                                            "If --input_a3m is not given (set to None), MSA will be generated automatically. ", default=None)
+                                            "If --input_a3m is not given (set to None), MSA will be generated automatically. ", default='./example/input/3owzA/3owzA.a3m')
     parser.add_argument("--output_dir", help="Path to the output dir. "
                                              "3D prediction is saved in .pdb format. "
                                              "Distogram prediction is saved in .npz format. "
-                                             "Secondary structure prediction is save in .ct format. ", required=True)
+                                             "Secondary structure prediction is save in .ct format. ", default='./example/output/3owzA')
     parser.add_argument("--relax_steps", help="Num of steps for structure refinement, default 1000.", default = 1000)
     parser.add_argument("--single_seq_pred", help="Default False. If --single_seq_pred is set to True, "
                                                        "the modeling will run using single sequence only (input_fas)", default=False)

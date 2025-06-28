@@ -368,6 +368,8 @@ class RNA3DDataset(Dataset):
         """解析PDB文件中的原子坐标"""
         atoms_data = []
         
+        last_res_name=''
+        last_res_num=0
         with open(pdb_file, 'r') as f:
             for line in f:
                 if line.startswith('ATOM'):
@@ -379,6 +381,16 @@ class RNA3DDataset(Dataset):
                     y = float(line[38:46].strip())
                     z = float(line[46:54].strip())
                     
+                    if res_num != last_res_num:
+                        atoms_data.append({
+                            'atom_name': atom_name,
+                            'res_name': last_res_name,
+                            'res_num': last_res_num,
+                            'coords': [x, y, z]
+                        })
+                        last_res_name = res_name
+
+
                     atoms_data.append({
                         'atom_name': atom_name,
                         'res_name': res_name,
@@ -453,18 +465,17 @@ class RNA3DDataset(Dataset):
                 flat_missing_mask = []
                 
                 for res_idx in range(len(sequence)):
-                    if residue_mask[res_idx]:  # 只处理有效残基
-                        res_coords = residue_coordinates[res_idx]  # [max_atoms_per_residue, 3]
-                        res_mask = residue_missing_mask[res_idx]   # [max_atoms_per_residue]
-                        
-                        # 获取该残基类型的预期原子数
-                        res_type = sequence[res_idx]
-                        if res_type in ['A', 'G', 'U', 'C']:
-                            expected_atoms = len(self.missing_atom_generator.atom_names_per_residue[res_type])
-                            # 只取预期的原子数量
-                            flat_coordinates.append(res_coords[:expected_atoms])
-                            flat_missing_mask.append(res_mask[:expected_atoms])
-                
+                    res_coords = residue_coordinates[res_idx]  # [max_atoms_per_residue, 3]
+                    res_mask = residue_missing_mask[res_idx]   # [max_atoms_per_residue]
+                    
+                    # 获取该残基类型的预期原子数
+                    res_type = sequence[res_idx]
+                    if res_type in ['A', 'G', 'U', 'C']:
+                        expected_atoms = len(self.missing_atom_generator.atom_names_per_residue[res_type])
+                        # 只取预期的原子数量
+                        flat_coordinates.append(res_coords[:expected_atoms])
+                        flat_missing_mask.append(res_mask[:expected_atoms])
+            
                 if flat_coordinates:
                     coordinates = torch.cat(flat_coordinates, dim=0)  # [N_atoms, 3]
                     missing_atom_mask = torch.cat(flat_missing_mask, dim=0)  # [N_atoms]
@@ -518,6 +529,46 @@ class RNA3DDataset(Dataset):
         
         return result
     
+    def get_sample_by_name(self, sample_name: str) -> Optional[Dict[str, Union[str, torch.Tensor, List[str], int, None]]]:
+        """
+        根据样本名称获取特定数据样本
+        
+        Args:
+            sample_name: 样本名称，如 "3meiA"
+            
+        Returns:
+            数据样本字典，如果未找到则返回None
+        """
+        # 查找匹配的样本
+        target_sample = None
+        for sample in self.samples:
+            if sample['name'] == sample_name:
+                target_sample = sample
+                break
+        
+        if target_sample is None:
+            logger.warning(f"未找到样本: {sample_name}")
+            logger.info(f"可用样本列表: {[s['name'] for s in self.samples[:10]]}...")  # 显示前10个样本名称
+            return None
+        
+        # 使用相同的逻辑处理这个样本（复用__getitem__的逻辑）
+        idx = self.samples.index(target_sample)
+        return self.__getitem__(idx)
+    
+    def list_sample_names(self, max_count: int = None) -> List[str]:
+        """
+        列出所有可用的样本名称
+        
+        Args:
+            max_count: 最大返回数量，None表示返回所有
+            
+        Returns:
+            样本名称列表
+        """
+        names = [sample['name'] for sample in self.samples]
+        if max_count is not None:
+            names = names[:max_count]
+        return names
 
 
 
@@ -556,7 +607,7 @@ def collate_fn(batch: List[Dict]) -> Dict[str, Union[torch.Tensor, List, None]]:
     else:
         raise ValueError(f"不一致的tokens维度: {token_dims}")
     
-    # 处理rMSA tokens
+    # 处理rna_fm tokens
     rna_fm_tokens = None
     if any(item['rna_fm_tokens'] is not None for item in batch):
         # 检查rna_fm_tokens的维度
@@ -620,8 +671,8 @@ def collate_fn(batch: List[Dict]) -> Dict[str, Union[torch.Tensor, List, None]]:
         result = {
             'names': names,
             'sequences': sequences,
-            'tokens': padded_tokens,
-            'rna_fm_tokens': rna_fm_tokens,
+            'tokens': padded_tokens,    #[batch_size, msa_depth, seq_length]
+            'rna_fm_tokens': rna_fm_tokens,  #[batch_size, seq_length]
             'coordinates': padded_coords,  # [batch_size, max_atoms, 3] - 平展格式
             'missing_atom_masks': missing_atom_masks,  # [batch_size, max_atoms] - 平展格式
             'atom_masks': atom_masks,  # [batch_size, max_atoms] - 原子存在掩码
