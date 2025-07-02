@@ -202,7 +202,7 @@ class RNA3DDataset(Dataset):
         
         # 设置子目录路径
         self.pdb_dir = self.data_dir / "pdb"
-        self.seq_dir = self.data_dir / "seq"
+        self.seq_dir = self.data_dir / "sequences"
         self.msa_dir = self.data_dir / "rMSA"
         self.list_dir = self.data_dir / "list"
         
@@ -265,7 +265,7 @@ class RNA3DDataset(Dataset):
         for sample_id in sample_ids:
             # 查找对应的文件
             pdb_file = self.pdb_dir / f"{sample_id}.pdb"
-            seq_file = self.seq_dir / f"{sample_id}.seq"
+            seq_file = self.seq_dir / f"{sample_id}.fasta"
             msa_file = self.msa_dir / f"{sample_id}.a3m"
             
             # 检查必需文件是否存在
@@ -368,8 +368,6 @@ class RNA3DDataset(Dataset):
         """解析PDB文件中的原子坐标"""
         atoms_data = []
         
-        last_res_name=''
-        last_res_num=0
         with open(pdb_file, 'r') as f:
             for line in f:
                 if line.startswith('ATOM'):
@@ -381,16 +379,6 @@ class RNA3DDataset(Dataset):
                     y = float(line[38:46].strip())
                     z = float(line[46:54].strip())
                     
-                    if res_num != last_res_num:
-                        atoms_data.append({
-                            'atom_name': atom_name,
-                            'res_name': last_res_name,
-                            'res_num': last_res_num,
-                            'coords': [x, y, z]
-                        })
-                        last_res_name = res_name
-
-
                     atoms_data.append({
                         'atom_name': atom_name,
                         'res_name': res_name,
@@ -792,22 +780,6 @@ class RNA3DDataLoader:
         """获取验证数据加载器"""
         return self.get_dataloader(fold=fold, split="valid", shuffle=False)
     
-    def get_all_folds_dataloaders(self) -> Dict[int, Dict[str, DataLoader]]:
-        """获取所有fold的数据加载器"""
-        all_loaders = {}
-        for fold in range(10):  # 0-9 fold
-            try:
-                train_loader = self.get_train_dataloader(fold)
-                valid_loader = self.get_valid_dataloader(fold)
-                all_loaders[fold] = {
-                    'train': train_loader,
-                    'valid': valid_loader
-                }
-                logger.info(f"✓ Fold {fold}: 训练样本 {len(train_loader.dataset)}, 验证样本 {len(valid_loader.dataset)}")
-            except Exception as e:
-                logger.warning(f"✗ Fold {fold} 加载失败: {e}")
-        
-        return all_loaders
 
 
 # 使用示例和测试函数

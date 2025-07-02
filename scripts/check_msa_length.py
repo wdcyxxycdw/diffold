@@ -97,7 +97,7 @@ def find_paired_files(data_dir: str) -> Dict[str, Tuple[str, str]]:
     Returns:
         字典，键为文件basename，值为(seq_path, msa_path)元组
     """
-    seq_dir = Path(data_dir) / "seq"
+    seq_dir = Path(data_dir) / "sequences"
     msa_dir = Path(data_dir) / "rMSA"
     
     if not seq_dir.exists():
@@ -107,7 +107,7 @@ def find_paired_files(data_dir: str) -> Dict[str, Tuple[str, str]]:
     
     # 找到所有seq文件
     seq_files = {}
-    for seq_file in seq_dir.glob("*.seq"):
+    for seq_file in seq_dir.glob("*.fasta"):
         basename = seq_file.stem  # 去掉扩展名
         seq_files[basename] = str(seq_file)
     

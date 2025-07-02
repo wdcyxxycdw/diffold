@@ -167,8 +167,10 @@ class Diffold(nn.Module):
 
     def forward(self, tokens, rna_fm_tokens, seq, target_coords=None, missing_atom_mask=None, **kwargs):
         # 确保RhoFold前向传播时不计算梯度
+        
         try:
             with torch.no_grad():
+                print("RhoFold输入:", tokens.shape, rna_fm_tokens.shape)
                 outputs, single_fea, pair_fea = self.rhofold(tokens, rna_fm_tokens, seq, **kwargs)
         except Exception as e:
             print(f"⚠️ RhoFold前向传播失败: {e}")
@@ -194,6 +196,8 @@ class Diffold(nn.Module):
                 return None, None, None
 
         print("RhoFold输出:", single_fea.shape, pair_fea.shape)
+
+        
         # 如果有目标坐标，继续diffusion训练
         af_in, atom_mask = process_alphafold3_input(
             ss_rna=[seq],

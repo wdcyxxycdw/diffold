@@ -44,7 +44,7 @@ class TrainingConfig:
     
     def __init__(self):
         # 数据配置
-        self.data_dir = "./RNA3D_DATA"
+        self.data_dir = "./processed_data"
         self.batch_size = 4
         self.max_sequence_length = 256
         self.num_workers = 4
@@ -86,6 +86,7 @@ class TrainingConfig:
         # 交叉验证配置
         self.fold = 0
         self.num_folds = 10
+        self.use_all_folds = False  # 新增：是否使用所有折数
 
 
 class TrainingMetrics:
@@ -243,11 +244,71 @@ class DiffoldTrainer:
             enable_missing_atom_mask=True
         )
         
-        self.train_loader = data_loader.get_train_dataloader(fold=self.config.fold)
-        self.valid_loader = data_loader.get_valid_dataloader(fold=self.config.fold)
-        
-        logger.info(f"训练样本数: {len(self.train_loader.dataset)}")
-        logger.info(f"验证样本数: {len(self.valid_loader.dataset)}")
+        if self.config.use_all_folds:
+            # 使用所有折数的数据
+            logger.info("使用所有折数的训练数据...")
+            all_loaders = data_loader.get_all_folds_dataloaders()
+            
+            # 合并所有折数的训练数据加载器
+            from torch.utils.data import ConcatDataset, DataLoader
+            from diffold.dataloader import collate_fn
+            
+            all_train_datasets = []
+            all_valid_datasets = []
+            
+            for fold, loaders in all_loaders.items():
+                train_dataset = loaders['train'].dataset
+                valid_dataset = loaders['valid'].dataset
+                all_train_datasets.append(train_dataset)
+                all_valid_datasets.append(valid_dataset)
+                
+                # 安全获取数据集大小
+                if hasattr(train_dataset, '__len__') and hasattr(valid_dataset, '__len__'):
+                    train_size = len(train_dataset)  # type: ignore
+                    valid_size = len(valid_dataset)  # type: ignore
+                    logger.info(f"Fold {fold}: 训练样本 {train_size}, 验证样本 {valid_size}")
+                else:
+                    logger.info(f"Fold {fold}: 已添加到合并数据集")
+            
+            # 合并数据集
+            combined_train_dataset = ConcatDataset(all_train_datasets)
+            combined_valid_dataset = ConcatDataset(all_valid_datasets)
+            
+            # 创建新的数据加载器
+            self.train_loader = DataLoader(
+                combined_train_dataset,
+                batch_size=batch_size,
+                shuffle=True,
+                num_workers=self.config.num_workers,
+                collate_fn=collate_fn,
+                pin_memory=True
+            )
+            
+            self.valid_loader = DataLoader(
+                combined_valid_dataset,
+                batch_size=batch_size,
+                shuffle=False,
+                num_workers=self.config.num_workers,
+                collate_fn=collate_fn,
+                pin_memory=True
+            )
+            
+            logger.info(f"合并后训练样本数: {len(combined_train_dataset)}")
+            logger.info(f"合并后验证样本数: {len(combined_valid_dataset)}")
+            
+        else:
+            # 使用单个折数的数据
+            self.train_loader = data_loader.get_train_dataloader(fold=self.config.fold)
+            self.valid_loader = data_loader.get_valid_dataloader(fold=self.config.fold)
+            
+            # 安全获取数据集大小
+            if hasattr(self.train_loader.dataset, '__len__'):
+                train_size = len(self.train_loader.dataset)  # type: ignore
+                logger.info(f"Fold {self.config.fold} - 训练样本数: {train_size}")
+            
+            if hasattr(self.valid_loader.dataset, '__len__'):
+                valid_size = len(self.valid_loader.dataset)  # type: ignore
+                logger.info(f"Fold {self.config.fold} - 验证样本数: {valid_size}")
         
         if self.config.test_mode:
             logger.info(f"测试模式：限制为前{self.config.test_samples}个样本")
@@ -547,13 +608,13 @@ class DiffoldTrainer:
         
         # 损失曲线
         epochs = range(1, len(self.metrics.train_losses) + 1)
-        axes[0, 0].plot(epochs, self.metrics.train_losses, 'b-', label='训练损失')
+        axes[0, 0].plot(epochs, self.metrics.train_losses, 'b-', label='Training Loss')
         if self.metrics.valid_losses:
             valid_epochs = range(1, len(self.metrics.valid_losses) + 1)
-            axes[0, 0].plot(valid_epochs, self.metrics.valid_losses, 'r-', label='验证损失')
+            axes[0, 0].plot(valid_epochs, self.metrics.valid_losses, 'r-', label='Validation Loss')
         axes[0, 0].set_xlabel('Epoch')
         axes[0, 0].set_ylabel('Loss')
-        axes[0, 0].set_title('训练和验证损失')
+        axes[0, 0].set_title('Training and Validation Loss')
         axes[0, 0].legend()
         axes[0, 0].grid(True)
         
@@ -562,7 +623,7 @@ class DiffoldTrainer:
             axes[0, 1].plot(epochs, self.metrics.learning_rates, 'g-')
             axes[0, 1].set_xlabel('Epoch')
             axes[0, 1].set_ylabel('Learning Rate')
-            axes[0, 1].set_title('学习率变化')
+            axes[0, 1].set_title('Learning Rate Schedule')
             axes[0, 1].grid(True)
         
         # 训练时间
@@ -570,7 +631,7 @@ class DiffoldTrainer:
             axes[1, 0].plot(epochs, self.metrics.epoch_times, 'orange')
             axes[1, 0].set_xlabel('Epoch')
             axes[1, 0].set_ylabel('Time (seconds)')
-            axes[1, 0].set_title('每轮训练时间')
+            axes[1, 0].set_title('Epoch Training Time')
             axes[1, 0].grid(True)
         
         # 损失分布（最近10个epoch）
@@ -579,7 +640,7 @@ class DiffoldTrainer:
             axes[1, 1].hist(recent_losses, bins=min(10, len(recent_losses)), alpha=0.7, color='blue')
             axes[1, 1].set_xlabel('Loss')
             axes[1, 1].set_ylabel('Frequency')
-            axes[1, 1].set_title('最近训练损失分布')
+            axes[1, 1].set_title('Recent Training Loss Distribution')
             axes[1, 1].grid(True)
         
         plt.tight_layout()
@@ -589,7 +650,7 @@ class DiffoldTrainer:
         plt.savefig(plot_path, dpi=300, bbox_inches='tight')
         plt.close()
         
-        logger.info(f"保存训练曲线: {plot_path}")
+        logger.info(f"Saved training curves: {plot_path}")
     
     def train(self, resume_from: Optional[str] = None):
         """主训练循环"""
@@ -694,7 +755,7 @@ def run_small_scale_test():
     config.test_mode = True
     config.test_epochs = 3
     config.test_samples = 8
-    config.batch_size = 1
+    config.batch_size = 2
     config.max_sequence_length = 128
     config.device = "cuda"
     config.num_workers = 0  # 避免多进程问题
@@ -724,14 +785,15 @@ def main():
     parser = argparse.ArgumentParser(description="Diffold模型训练")
     
     # 数据参数
-    parser.add_argument("--data_dir", type=str, default="./RNA3D_DATA", help="数据目录")
+    parser.add_argument("--data_dir", type=str, default="./processed_data", help="数据目录")
     parser.add_argument("--batch_size", type=int, default=1, help="批次大小")
     parser.add_argument("--max_length", type=int, default=512, help="最大序列长度")
     parser.add_argument("--num_workers", type=int, default=4, help="数据加载进程数")
     parser.add_argument("--fold", type=int, default=0, help="交叉验证折数 (0-9)")
+    parser.add_argument("--use_all_folds", action="store_true", help="使用所有折数的数据进行训练", default=True)
     
     # 训练参数
-    parser.add_argument("--epochs", type=int, default=100, help="训练轮数")
+    parser.add_argument("--epochs", type=int, default=1, help="训练轮数")
     parser.add_argument("--learning_rate", type=float, default=1e-4, help="学习率")
     parser.add_argument("--weight_decay", type=float, default=1e-5, help="权重衰减")
     parser.add_argument("--grad_clip", type=float, default=1.0, help="梯度裁剪阈值")
@@ -770,6 +832,7 @@ def main():
     config.max_sequence_length = args.max_length
     config.num_workers = args.num_workers
     config.fold = args.fold
+    config.use_all_folds = args.use_all_folds
     
     config.num_epochs = args.epochs
     config.learning_rate = args.learning_rate

@@ -3,3 +3,7 @@ __pycache__/
 RNA3D_DATA
 test_output
 test_checkpoints
+processed_data/*
+.venv
+.vscode
+DS_Store
