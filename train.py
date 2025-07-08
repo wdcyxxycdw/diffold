@@ -420,7 +420,7 @@ class DiffoldTrainer:
                 result = self.model(
                     tokens=tokens,
                     rna_fm_tokens=rna_fm_tokens,
-                    seq=sequences[0] if isinstance(sequences, list) else sequences,
+                    seq=sequences,
                     target_coords=coordinates,
                     missing_atom_mask=missing_atom_masks
                 )
@@ -428,7 +428,7 @@ class DiffoldTrainer:
             result = self.model(
                 tokens=tokens,
                 rna_fm_tokens=rna_fm_tokens,
-                seq=sequences[0] if isinstance(sequences, list) else sequences,
+                seq=sequences,
                 target_coords=coordinates,
                 missing_atom_mask=missing_atom_masks
             )
@@ -502,7 +502,7 @@ class DiffoldTrainer:
                     result = self.model(
                         tokens=tokens,
                         rna_fm_tokens=rna_fm_tokens,
-                        seq=sequences[0] if isinstance(sequences, list) else sequences,
+                        seq=sequences,
                         target_coords=coordinates,
                         missing_atom_mask=missing_atom_masks
                     )
@@ -754,8 +754,8 @@ def run_small_scale_test():
     config = TrainingConfig()
     config.test_mode = True
     config.test_epochs = 3
-    config.test_samples = 8
-    config.batch_size = 2
+    config.test_samples = 6
+    config.batch_size = 3
     config.max_sequence_length = 128
     config.device = "cuda"
     config.num_workers = 0  # 避免多进程问题
@@ -790,7 +790,7 @@ def main():
     parser.add_argument("--max_length", type=int, default=512, help="最大序列长度")
     parser.add_argument("--num_workers", type=int, default=4, help="数据加载进程数")
     parser.add_argument("--fold", type=int, default=0, help="交叉验证折数 (0-9)")
-    parser.add_argument("--use_all_folds", action="store_true", help="使用所有折数的数据进行训练", default=True)
+    parser.add_argument("--use_all_folds", action="store_true", help="使用所有折数的数据进行训练", default=False)
     
     # 训练参数
     parser.add_argument("--epochs", type=int, default=1, help="训练轮数")
@@ -814,7 +814,7 @@ def main():
     
     # 其他参数
     parser.add_argument("--resume", type=str, default=None, help="从检查点恢复训练")
-    parser.add_argument("--test", action="store_true", help="运行小规模测试")
+    parser.add_argument("--test", action="store_true", help="运行小规模测试", default=True)
     
     args = parser.parse_args()
     

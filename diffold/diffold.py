@@ -9,7 +9,7 @@ from alphafold3_pytorch import(
     RelativePositionEncoding,
 )
 from alphafold3_pytorch.inputs import NUM_MOLECULE_IDS
-from diffold.input_processor import process_alphafold3_input
+from diffold.input_processor import process_alphafold3_input, process_multiple_alphafold3_inputs
 
 from rhofold.rhofold import RhoFold
 
@@ -164,20 +164,73 @@ class Diffold(nn.Module):
     def set_eval_mode(self):
         """设置为推理模式"""
         self.eval()
-
-    def forward(self, tokens, rna_fm_tokens, seq, target_coords=None, missing_atom_mask=None, **kwargs):
+    
+    def forward(self, tokens, rna_fm_tokens, seq, target_coords=None, missing_atom_mask=None, seq_lengths=None, **kwargs):
         # 确保RhoFold前向传播时不计算梯度
-        
+        batch_num = tokens.shape[0]
+        is_batched = batch_num > 1
         try:
-            with torch.no_grad():
-                print("RhoFold输入:", tokens.shape, rna_fm_tokens.shape)
-                outputs, single_fea, pair_fea = self.rhofold(tokens, rna_fm_tokens, seq, **kwargs)
+            if is_batched:
+                # 获取序列长度信息
+                if seq_lengths is None:
+                    # 如果没有提供seq_lengths，尝试从seq中推断
+                    if isinstance(seq, list):
+                        seq_lengths = torch.tensor([len(s) for s in seq], device=tokens.device)
+                    else:
+                        # 假设所有序列都是最大长度（保持原有行为）
+                        seq_lengths = torch.full((batch_num,), tokens.shape[1], device=tokens.device)
+                
+                # 准备存储结果的列表
+                single_features = []
+                pair_features = []
+                max_seq_len = tokens.shape[2]  # padding后的最大长度
+                
+                print(f"处理batch: {batch_num}个序列, 最大长度: {max_seq_len}")
+                
+                for i in range(batch_num):
+                    current_seq_len = seq_lengths[i].item()
+                    print(f"处理序列 {i+1}/{batch_num}, 真实长度: {current_seq_len}")
+                    
+                    # 去掉padding，只保留真实序列部分
+                    current_tokens = tokens[i:i+1, :, :current_seq_len]  # [1, MSA_depth, real_len]
+                    current_rna_fm_tokens = rna_fm_tokens[i:i+1, :current_seq_len] if rna_fm_tokens is not None else None
+                    
+                    current_seq = seq[i]
+                    
+                    # 处理当前序列
+                    with torch.no_grad():
+                        print(f"RhoFold输入[{i}]: tokens {current_tokens.shape}, rna_fm_tokens {current_rna_fm_tokens.shape if current_rna_fm_tokens is not None else 'None'}")
+                        outputs, single, pair = self.rhofold(current_tokens, current_rna_fm_tokens, current_seq, **kwargs)
+                        
+                        # single: [1, real_len, 256], pair: [1, real_len, real_len, 128]
+                        print(f"RhoFold输出[{i}]: single {single.shape}, pair {pair.shape}")
+                        
+                        # 将结果padding回原始大小以便后续batch处理
+                        padded_single = torch.zeros(1, max_seq_len, single.shape[-1], device=tokens.device)
+                        padded_pair = torch.zeros(1, max_seq_len, max_seq_len, pair.shape[-1], device=tokens.device)
+                        
+                        padded_single[:, :current_seq_len] = single
+                        padded_pair[:, :current_seq_len, :current_seq_len] = pair
+                        
+                        single_features.append(padded_single)
+                        pair_features.append(padded_pair)
+                
+                # 将所有序列的结果重新组合成batch
+                single_fea = torch.cat(single_features, dim=0)  # [batch_num, max_seq_len, 256]
+                pair_fea = torch.cat(pair_features, dim=0)      # [batch_num, max_seq_len, max_seq_len, 128]
+                
+                print(f"合并后的特征: single {single_fea.shape}, pair {pair_fea.shape}")
+                
+            else:
+                with torch.no_grad():
+                    print("RhoFold输入:", tokens.shape, rna_fm_tokens.shape if rna_fm_tokens is not None else 'None')
+                    outputs, single_fea, pair_fea = self.rhofold(tokens, rna_fm_tokens, seq, **kwargs)
         except Exception as e:
             print(f"⚠️ RhoFold前向传播失败: {e}")
             import traceback
             traceback.print_exc()
             exit()
-            
+                
         # 如果需要梯度用于后续计算，可以detach并重新设置requires_grad
         if single_fea is not None:
             single_fea = single_fea.detach()
@@ -198,19 +251,70 @@ class Diffold(nn.Module):
         print("RhoFold输出:", single_fea.shape, pair_fea.shape)
 
         
-        # 如果有目标坐标，继续diffusion训练
-        af_in, atom_mask = process_alphafold3_input(
-            ss_rna=[seq],
-            atom_pos=target_coords,
-        )
+        # 处理target_coords，将batch张量转换为列表格式
+        atom_pos_list = None
+        if target_coords is not None:
+            if is_batched:
+                # 为batch处理准备输入列表
+                input_list = []
+                for i in range(batch_num):
+                    current_seq_len = seq_lengths[i].item()
+                    
+                    # 获取当前序列的坐标
+                    if missing_atom_mask is not None:
+                        # 使用missing_atom_mask确定真实原子数量
+                        current_missing_mask = missing_atom_mask[i]  # type: ignore
+                        # 找到有效原子的数量
+                        valid_atoms = (~current_missing_mask).sum().item()
+                        if valid_atoms > 0:
+                            current_coords = target_coords[i, :valid_atoms]  # [valid_atoms, 3]
+                        else:
+                            # 如果没有有效原子，创建空张量
+                            current_coords = torch.empty(0, 3, device=target_coords.device)
+                    else:
+                        # 如果没有missing_atom_mask，使用所有坐标
+                        current_coords = target_coords[i]  # [max_atoms, 3]
+                    
+                    # 为每个序列创建单独的输入字典
+                    input_dict = {
+                        'ss_rna': [seq[i]],  # type: ignore # 单个序列作为列表
+                        'atom_pos': [current_coords]  # 单个坐标张量作为列表
+                    }
+                    input_list.append(input_dict)
+                    
+                    print(f"序列[{i}]: {seq[i][:10] if seq is not None else 'None'}..., 序列长度: {current_seq_len}, 原子数: {current_coords.shape[0]}")
+                
+                # 使用process_multiple_alphafold3_inputs处理batch
+                result = process_multiple_alphafold3_inputs(
+                    input_list, 
+                )
+                af_in, atom_mask = result  # type: ignore
+            else:
+                # 单个序列的情况，使用原来的方式
+                if missing_atom_mask is not None:
+                    valid_atoms = (~missing_atom_mask[0]).sum().item()
+                    if valid_atoms > 0:
+                        atom_pos_list = [target_coords[0, :valid_atoms]]
+                    else:
+                        atom_pos_list = [torch.empty(0, 3, device=target_coords.device)]
+                else:
+                    atom_pos_list = [target_coords[0]]
+                
+                af_in, atom_mask = process_alphafold3_input(
+                    ss_rna=[seq[0]] if seq is not None else [],
+                    atom_pos=atom_pos_list,
+                )
+        else:
+            print("没有目标坐标")
+            exit()
 
         print("AlphaFold3输入:",
-            "atom_inputs", af_in.atom_inputs.shape,
-            "atompair_inputs", af_in.atompair_inputs.shape,
-            "additional_token_feats", af_in.additional_token_feats.shape,
-            "molecule_atom_lens", af_in.molecule_atom_lens.shape,
-            "molecule_ids", af_in.molecule_ids.shape,
-            "atom_mask", atom_mask.shape
+            "atom_inputs", af_in.atom_inputs.shape if af_in.atom_inputs is not None else 'None',
+            "atompair_inputs", af_in.atompair_inputs.shape if af_in.atompair_inputs is not None else 'None',
+            "additional_token_feats", af_in.additional_token_feats.shape if af_in.additional_token_feats is not None else 'None',
+            "molecule_atom_lens", af_in.molecule_atom_lens.shape if af_in.molecule_atom_lens is not None else 'None',
+            "molecule_ids", af_in.molecule_ids.shape if af_in.molecule_ids is not None else 'None',
+            "atom_mask", atom_mask.shape if atom_mask is not None else 'None'
         )
 
         # 获取设备信息并将所有输入数据移动到正确的设备
@@ -258,15 +362,42 @@ class Diffold(nn.Module):
         )
 
         if self.training:
-            mask = af_in.molecule_atom_lens > 0
+            # 生成更精确的mask，考虑序列长度的差异
+            if af_in.molecule_atom_lens is not None:
+                mask = af_in.molecule_atom_lens > 0
+                
+                # 如果提供了seq_lengths，进一步细化mask以处理序列长度差异
+                if seq_lengths is not None and is_batched:
+                    # 基于真实序列长度调整单个表示的mask
+                    batch_size, max_seq_len = single_fea.shape[0], single_fea.shape[1]
+                    seq_mask = torch.zeros(batch_size, max_seq_len, device=device, dtype=torch.bool)
+                    
+                    for i in range(batch_size):
+                        actual_len = seq_lengths[i].item()
+                        seq_mask[i, :actual_len] = True
+                    
+                    print(f"生成序列mask: {seq_mask.shape}, 真实长度: {seq_lengths.tolist()}")
+                    
+                    # 将seq_mask应用到single和pair特征上
+                    single_fea = single_fea * seq_mask.unsqueeze(-1)  # [bs, seq_len, dim] * [bs, seq_len, 1]
+                    pair_fea = pair_fea * seq_mask.unsqueeze(-1).unsqueeze(-2)  # 应用到行
+                    pair_fea = pair_fea * seq_mask.unsqueeze(-2).unsqueeze(-1)  # 应用到列
+            else:
+                print("没有提供seq_lengths")
+                exit()
 
-            batch_num=af_in.atom_pos.shape[0]
-            padded_atom_num=af_in.atom_pos.shape[1]
-            real_atom_num=missing_atom_mask.shape[1]
-            if padded_atom_num > real_atom_num:    
-                missing_atom_mask = torch.cat([missing_atom_mask, torch.zeros(batch_num, padded_atom_num - real_atom_num, device=missing_atom_mask.device, dtype=missing_atom_mask.dtype)], dim=1)
+            # 处理missing_atom_mask的维度对齐
+            if af_in.atom_pos is not None and missing_atom_mask is not None:
+                batch_num = af_in.atom_pos.shape[0]
+                padded_atom_num = af_in.atom_pos.shape[1]
+                real_atom_num = missing_atom_mask.shape[1]
+                if padded_atom_num > real_atom_num:    
+                    missing_atom_mask = torch.cat([
+                        missing_atom_mask, 
+                        torch.ones(batch_num, padded_atom_num - real_atom_num, device=device, dtype=missing_atom_mask.dtype)
+                    ], dim=1)
+                    print(f"扩展missing_atom_mask: {real_atom_num} -> {padded_atom_num}")
 
-                        
             relative_position_encoding = self.relative_position_encoding(
                 additional_molecule_feats = af_in.additional_molecule_feats,
             )

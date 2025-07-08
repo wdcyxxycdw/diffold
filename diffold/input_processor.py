@@ -151,7 +151,6 @@ def process_alphafold3_input(
 def process_multiple_alphafold3_inputs(
     input_list: List[dict],
     atoms_per_window: int = 27,
-    return_atom_mask: bool = False
 ) -> Union[BatchedAtomInput, Tuple[BatchedAtomInput, torch.Tensor]]:
     """
     处理多个AlphaFold3输入，返回批量处理后的结果
@@ -201,21 +200,69 @@ def process_multiple_alphafold3_inputs(
         atoms_per_window=atoms_per_window
     )
     
-    # 如果需要返回atom_mask，则计算它
-    if return_atom_mask:
-        # 从molecule_atom_lens计算total_atoms
-        molecule_atom_lens = batched_input.molecule_atom_lens
-        total_atoms = molecule_atom_lens.sum(dim=-1)
-        
-        # 获取atom_seq_len（原子序列的最大长度）
-        atom_seq_len = batched_input.atom_inputs.shape[1]
-        
-        # 生成atom_mask
-        atom_mask = lens_to_mask(total_atoms, max_len=atom_seq_len)
-        
-        return batched_input, atom_mask
+    # 从molecule_atom_lens计算total_atoms
+    molecule_atom_lens = batched_input.molecule_atom_lens
+    total_atoms = molecule_atom_lens.sum(dim=-1)
     
-    return batched_input
+    # 获取atom_seq_len（原子序列的最大长度）
+    atom_seq_len = batched_input.atom_inputs.shape[1]
+    
+    # 【添加原子数量对齐处理】与process_alphafold3_input保持一致
+    print(f"Multiple inputs - 原始 atom_pos 维度: {batched_input.atom_pos.shape if batched_input.atom_pos is not None else 'None'}")
+    
+    if batched_input.atom_pos is not None:
+        # 确保atom_pos存在的断言，帮助类型检查
+        assert batched_input.atom_pos is not None
+        
+        # 确保atom_pos是3维张量 [batch_size, num_atoms, 3]
+        if batched_input.atom_pos.dim() == 4:
+            # 如果是4维，压缩多余的维度
+            if batched_input.atom_pos.shape[0] == 1:
+                batched_input.atom_pos = batched_input.atom_pos.squeeze(0)
+            elif batched_input.atom_pos.shape[1] == 1:
+                batched_input.atom_pos = batched_input.atom_pos.squeeze(1)
+            else:
+                # 如果两个维度都不是1，选择保留最后3个维度
+                batched_input.atom_pos = batched_input.atom_pos.view(-1, batched_input.atom_pos.shape[-2], batched_input.atom_pos.shape[-1])
+        elif batched_input.atom_pos.dim() == 2:
+            # 如果是2维，添加batch维度
+            batched_input.atom_pos = batched_input.atom_pos.unsqueeze(0)
+        elif batched_input.atom_pos.dim() != 3:
+            raise ValueError(f"不支持的atom_pos维度: {batched_input.atom_pos.shape}")
+        
+        print(f"Multiple inputs - 处理后 atom_pos 维度: {batched_input.atom_pos.shape}")
+        
+        # 获取处理后的维度信息
+        atom_num_in_coords = batched_input.atom_pos.shape[1]
+        batch_num = batched_input.atom_pos.shape[0]
+
+        # 生成atom_mask，使用atom_pos的实际原子数量
+        atom_mask = lens_to_mask(total_atoms, max_len=atom_num_in_coords)
+
+        print(f"Multiple inputs - atom_pos: {batched_input.atom_pos.shape}")
+        print(f"Multiple inputs - atom_mask: {atom_mask.shape}")
+        
+        # 如果atom_inputs的原子数量大于atom_pos的原子数量，需要填充
+        if atom_seq_len > atom_num_in_coords:
+            print(f"Multiple inputs - 填充 atom_pos: {atom_num_in_coords} -> {atom_seq_len}")
+            padding_atoms = atom_seq_len - atom_num_in_coords
+            
+            # 确保batched_input.atom_pos不为None
+            assert batched_input.atom_pos is not None
+            batched_input.atom_pos = torch.cat([
+                batched_input.atom_pos, 
+                torch.zeros(batch_num, padding_atoms, 3, device=batched_input.atom_pos.device)
+            ], dim=1)
+            atom_mask = torch.cat([
+                atom_mask, 
+                torch.zeros(batch_num, padding_atoms, device=atom_mask.device, dtype=atom_mask.dtype)
+            ], dim=1)
+    else:
+        # 如果没有atom_pos，使用默认的atom_mask生成
+        atom_mask = lens_to_mask(total_atoms, max_len=atom_seq_len)
+    
+    return batched_input, atom_mask
+
 
 
 def get_input_shapes(batched_input: BatchedAtomInput) -> dict:
