@@ -227,8 +227,8 @@ class DiffoldTrainer:
         logger.info("初始化数据加载器...")
         
         if self.config.test_mode:
-            # 测试模式：使用更小的batch size和数据量
-            batch_size = min(2, self.config.batch_size)
+            # 测试模式：保持用户设置的batch_size，但限制最大序列长度
+            batch_size = self.config.batch_size
             max_length = min(128, self.config.max_sequence_length)
         else:
             batch_size = self.config.batch_size
@@ -434,10 +434,16 @@ class DiffoldTrainer:
             )
         
         # 处理模型输出
-        if result is None or (isinstance(result, tuple) and result[0] is None):
+        if result is None:
             return None
         
-        if isinstance(result, tuple):
+        # 新的字典格式返回值
+        if isinstance(result, dict):
+            loss = result.get('loss', None)
+            if loss is None:
+                return None
+        elif isinstance(result, tuple):
+            # 兼容旧格式
             loss = result[0]
         else:
             loss = result
@@ -508,16 +514,20 @@ class DiffoldTrainer:
                     )
                     
                     if result is not None:
-                        if isinstance(result, tuple):
+                        # 新的字典格式返回值
+                        if isinstance(result, dict):
+                            loss = result.get('loss', None)
+                        elif isinstance(result, tuple):
+                            # 兼容旧格式
                             loss = result[0]
                         else:
                             loss = result
                         
-                        if not torch.isnan(loss) and not torch.isinf(loss):
+                        if loss is not None and not torch.isnan(loss) and not torch.isinf(loss):
                             total_loss += loss.item()
                             num_batches += 1
-                        
-                        progress_bar.set_postfix({'val_loss': f"{loss.item():.6f}"})
+                            
+                            progress_bar.set_postfix({'val_loss': f"{loss.item():.6f}"})
                 
                 except Exception as e:
                     logger.warning(f"验证 Batch {batch_idx} 失败: {e}")

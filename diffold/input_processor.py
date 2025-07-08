@@ -151,7 +151,7 @@ def process_alphafold3_input(
 def process_multiple_alphafold3_inputs(
     input_list: List[dict],
     atoms_per_window: int = 27,
-) -> Union[BatchedAtomInput, Tuple[BatchedAtomInput, torch.Tensor]]:
+) -> Tuple[BatchedAtomInput, torch.Tensor]:
     """
     处理多个AlphaFold3输入，返回批量处理后的结果
     

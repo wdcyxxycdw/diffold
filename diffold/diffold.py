@@ -188,7 +188,10 @@ class Diffold(nn.Module):
                 print(f"处理batch: {batch_num}个序列, 最大长度: {max_seq_len}")
                 
                 for i in range(batch_num):
-                    current_seq_len = seq_lengths[i].item()
+                    if seq_lengths is not None:
+                        current_seq_len = seq_lengths[i].item()
+                    else:
+                        current_seq_len = tokens.shape[2]  # 使用padding后的最大长度
                     print(f"处理序列 {i+1}/{batch_num}, 真实长度: {current_seq_len}")
                     
                     # 去掉padding，只保留真实序列部分
@@ -258,7 +261,10 @@ class Diffold(nn.Module):
                 # 为batch处理准备输入列表
                 input_list = []
                 for i in range(batch_num):
-                    current_seq_len = seq_lengths[i].item()
+                    if seq_lengths is not None:
+                        current_seq_len = seq_lengths[i].item()
+                    else:
+                        current_seq_len = tokens.shape[2]  # 使用padding后的最大长度
                     
                     # 获取当前序列的坐标
                     if missing_atom_mask is not None:
@@ -361,46 +367,52 @@ class Diffold(nn.Module):
             molecule_ids = af_in.molecule_ids
         )
 
-        if self.training:
-            # 生成更精确的mask，考虑序列长度的差异
-            if af_in.molecule_atom_lens is not None:
-                mask = af_in.molecule_atom_lens > 0
+        # 生成更精确的mask，考虑序列长度的差异
+        if af_in.molecule_atom_lens is not None:
+            mask = af_in.molecule_atom_lens > 0
+            
+            # 如果提供了seq_lengths，进一步细化mask以处理序列长度差异
+            if seq_lengths is not None and is_batched:
+                # 基于真实序列长度调整单个表示的mask
+                batch_size, max_seq_len = single_fea.shape[0], single_fea.shape[1]
+                seq_mask = torch.zeros(batch_size, max_seq_len, device=device, dtype=torch.bool)
                 
-                # 如果提供了seq_lengths，进一步细化mask以处理序列长度差异
-                if seq_lengths is not None and is_batched:
-                    # 基于真实序列长度调整单个表示的mask
-                    batch_size, max_seq_len = single_fea.shape[0], single_fea.shape[1]
-                    seq_mask = torch.zeros(batch_size, max_seq_len, device=device, dtype=torch.bool)
-                    
-                    for i in range(batch_size):
-                        actual_len = seq_lengths[i].item()
-                        seq_mask[i, :actual_len] = True
-                    
-                    print(f"生成序列mask: {seq_mask.shape}, 真实长度: {seq_lengths.tolist()}")
-                    
-                    # 将seq_mask应用到single和pair特征上
-                    single_fea = single_fea * seq_mask.unsqueeze(-1)  # [bs, seq_len, dim] * [bs, seq_len, 1]
-                    pair_fea = pair_fea * seq_mask.unsqueeze(-1).unsqueeze(-2)  # 应用到行
-                    pair_fea = pair_fea * seq_mask.unsqueeze(-2).unsqueeze(-1)  # 应用到列
-            else:
-                print("没有提供seq_lengths")
-                exit()
+                for i in range(batch_size):
+                    actual_len = seq_lengths[i].item()
+                    seq_mask[i, :actual_len] = True
+                
+                print(f"生成序列mask: {seq_mask.shape}, 真实长度: {seq_lengths.tolist() if seq_lengths is not None else 'None'}")
+                
+                # 将seq_mask应用到single和pair特征上
+                single_fea = single_fea * seq_mask.unsqueeze(-1)  # [bs, seq_len, dim] * [bs, seq_len, 1]
+                pair_fea = pair_fea * seq_mask.unsqueeze(-1).unsqueeze(-2)  # 应用到行
+                pair_fea = pair_fea * seq_mask.unsqueeze(-2).unsqueeze(-1)  # 应用到列
+        else:
+            print("没有提供molecule_atom_lens")
+            exit()
 
-            # 处理missing_atom_mask的维度对齐
-            if af_in.atom_pos is not None and missing_atom_mask is not None:
-                batch_num = af_in.atom_pos.shape[0]
-                padded_atom_num = af_in.atom_pos.shape[1]
-                real_atom_num = missing_atom_mask.shape[1]
-                if padded_atom_num > real_atom_num:    
-                    missing_atom_mask = torch.cat([
-                        missing_atom_mask, 
-                        torch.ones(batch_num, padded_atom_num - real_atom_num, device=device, dtype=missing_atom_mask.dtype)
-                    ], dim=1)
-                    print(f"扩展missing_atom_mask: {real_atom_num} -> {padded_atom_num}")
+        # 处理missing_atom_mask的维度对齐
+        if af_in.atom_pos is not None and missing_atom_mask is not None:
+            batch_num = af_in.atom_pos.shape[0]
+            padded_atom_num = af_in.atom_pos.shape[1]
+            real_atom_num = missing_atom_mask.shape[1]
+            if padded_atom_num > real_atom_num:    
+                missing_atom_mask = torch.cat([
+                    missing_atom_mask, 
+                    torch.ones(batch_num, padded_atom_num - real_atom_num, device=device, dtype=missing_atom_mask.dtype)
+                ], dim=1)
+                print(f"扩展missing_atom_mask: {real_atom_num} -> {padded_atom_num}")
 
-            relative_position_encoding = self.relative_position_encoding(
-                additional_molecule_feats = af_in.additional_molecule_feats,
-            )
+        relative_position_encoding = self.relative_position_encoding(
+            additional_molecule_feats = af_in.additional_molecule_feats,
+        )
+        
+        # 判断是否有ground truth数据
+        has_ground_truth = target_coords is not None and af_in.atom_pos is not None
+        
+        if has_ground_truth:
+            # 有ground truth：计算损失（无论training还是eval模式）
+            print(f"计算损失 - 模式: {'训练' if self.training else '验证'}")
             
             diffusion_loss, denoised_atom_pos, diffusion_loss_breakdown, _ = self.edm(
                 atom_pos_ground_truth = af_in.atom_pos,
@@ -425,7 +437,36 @@ class Diffold(nn.Module):
                 nucleotide_loss_weight = self.nucleotide_loss_weight,
                 ligand_loss_weight = self.ligand_loss_weight,
             )
-            return diffusion_loss, denoised_atom_pos, diffusion_loss_breakdown
+            
+            return {
+                'loss': diffusion_loss,
+                'predicted_coords': denoised_atom_pos,
+                'loss_breakdown': diffusion_loss_breakdown,
+                'atom_mask': atom_mask,
+                'mode': 'supervised'
+            }
         else:
-            pass
+            # 没有ground truth：进行采样
+            print("进行采样生成")
+            
+            sampled_coords = self.edm.sample(
+                atom_feats = atom_feats,
+                atompair_feats = atompair_feats,
+                atom_parent_ids = af_in.atom_parent_ids,
+                atom_mask = atom_mask,
+                mask = mask,
+                single_trunk_repr = single_fea,
+                single_inputs_repr = single_inputs,
+                pairwise_trunk = pair_fea,
+                pairwise_rel_pos_feats = relative_position_encoding,
+                molecule_atom_lens = af_in.molecule_atom_lens,
+                num_sample_steps = 32,  # 采样步数
+                use_tqdm_pbar = False,
+            )
+            
+            return {
+                'predicted_coords': sampled_coords,
+                'atom_mask': atom_mask,
+                'mode': 'sampling'
+            }
 
