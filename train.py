@@ -78,6 +78,10 @@ class TrainingConfig:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.mixed_precision = True
         
+        # 多GPU配置
+        self.use_data_parallel = True  # 是否使用DataParallel
+        self.gpu_ids = None  # 指定使用的GPU ID列表，None表示使用所有可用GPU
+        
         # 小规模测试配置
         self.test_mode = False
         self.test_samples = 10
@@ -215,8 +219,51 @@ class DiffoldTrainer:
         # 设置训练模式
         model.set_train_mode()
         
+        # 多GPU设置
+        if (self.config.use_data_parallel and 
+            self.device.type == 'cuda' and 
+            torch.cuda.device_count() > 1):
+            
+            # 检测可用GPU
+            available_gpus = torch.cuda.device_count()
+            logger.info(f"检测到 {available_gpus} 个GPU")
+            
+            # 确定使用的GPU
+            if self.config.gpu_ids is None:
+                gpu_ids = list(range(available_gpus))
+            else:
+                gpu_ids = self.config.gpu_ids
+                # 验证GPU ID的有效性
+                for gpu_id in gpu_ids:
+                    if gpu_id >= available_gpus:
+                        raise ValueError(f"GPU ID {gpu_id} 不存在，只有 {available_gpus} 个GPU")
+            
+            logger.info(f"使用GPU: {gpu_ids}")
+            
+            # 包装模型为DataParallel
+            model = nn.DataParallel(model, device_ids=gpu_ids)
+            
+            # 更新有效batch size
+            effective_batch_size = self.config.batch_size * len(gpu_ids)
+            logger.info(f"DataParallel启用：每GPU batch_size={self.config.batch_size}, 有效batch_size={effective_batch_size}")
+            
+            # 标记是否使用了DataParallel
+            self.using_data_parallel = True
+            self.num_gpus = len(gpu_ids)
+        else:
+            if self.device.type == 'cuda':
+                logger.info("使用单GPU训练")
+            else:
+                logger.info("使用CPU训练")
+            self.using_data_parallel = False
+            self.num_gpus = 1
+        
         # 获取可训练参数统计
-        trainable_params = model.get_trainable_parameters()
+        if self.using_data_parallel:
+            trainable_params = model.module.get_trainable_parameters()
+        else:
+            trainable_params = model.get_trainable_parameters()
+        
         total_params = sum(p.numel() for p in trainable_params)
         logger.info(f"可训练参数数量: {total_params:,}")
         
@@ -316,7 +363,10 @@ class DiffoldTrainer:
     def setup_optimizer_and_scheduler(self):
         """初始化优化器和学习率调度器"""
         # 获取可训练参数
-        trainable_params = self.model.get_trainable_parameters()
+        if self.using_data_parallel:
+            trainable_params = self.model.module.get_trainable_parameters()
+        else:
+            trainable_params = self.model.get_trainable_parameters()
         
         # 优化器
         self.optimizer = optim.AdamW(
@@ -452,12 +502,18 @@ class DiffoldTrainer:
         if self.scaler is not None:
             self.scaler.scale(loss).backward()
             self.scaler.unscale_(self.optimizer)
-            torch.nn.utils.clip_grad_norm_(self.model.get_trainable_parameters(), self.config.grad_clip_norm)
+            if self.using_data_parallel:
+                torch.nn.utils.clip_grad_norm_(self.model.module.get_trainable_parameters(), self.config.grad_clip_norm)
+            else:
+                torch.nn.utils.clip_grad_norm_(self.model.get_trainable_parameters(), self.config.grad_clip_norm)
             self.scaler.step(self.optimizer)
             self.scaler.update()
         else:
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.get_trainable_parameters(), self.config.grad_clip_norm)
+            if self.using_data_parallel:
+                torch.nn.utils.clip_grad_norm_(self.model.module.get_trainable_parameters(), self.config.grad_clip_norm)
+            else:
+                torch.nn.utils.clip_grad_norm_(self.model.get_trainable_parameters(), self.config.grad_clip_norm)
             self.optimizer.step()
         
         return loss
@@ -538,14 +594,22 @@ class DiffoldTrainer:
     
     def save_checkpoint(self, epoch: int, is_best: bool = False):
         """保存检查点"""
+        # 处理DataParallel的state_dict
+        if self.using_data_parallel:
+            model_state_dict = self.model.module.state_dict()
+        else:
+            model_state_dict = self.model.state_dict()
+            
         checkpoint = {
             'epoch': epoch,
-            'model_state_dict': self.model.state_dict(),
+            'model_state_dict': model_state_dict,
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,
             'metrics': self.metrics.to_dict(),
             'config': self.config.__dict__,
             'scaler_state_dict': self.scaler.state_dict() if self.scaler else None,
+            'using_data_parallel': self.using_data_parallel,
+            'num_gpus': self.num_gpus,
         }
         
         # 保存最新检查点
@@ -584,8 +648,12 @@ class DiffoldTrainer:
         logger.info(f"加载检查点: {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
         
-        # 加载模型状态
-        self.model.load_state_dict(checkpoint['model_state_dict'])
+        # 加载模型状态（处理DataParallel）
+        model_state_dict = checkpoint['model_state_dict']
+        if self.using_data_parallel:
+            self.model.module.load_state_dict(model_state_dict)
+        else:
+            self.model.load_state_dict(model_state_dict)
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         
         if self.scheduler and checkpoint.get('scheduler_state_dict'):
@@ -772,6 +840,7 @@ def run_small_scale_test():
     config.output_dir = "./test_output"
     config.checkpoint_dir = "./test_checkpoints"
     config.mixed_precision = False  # 测试时禁用混合精度
+    config.use_data_parallel = False  # 测试时禁用多GPU
     
     try:
         # 创建训练器
@@ -821,6 +890,8 @@ def main():
     # 设备参数
     parser.add_argument("--device", type=str, default="cuda", help="设备 (auto/cpu/cuda)")
     parser.add_argument("--no_mixed_precision", action="store_true", help="禁用混合精度训练")
+    parser.add_argument("--no_data_parallel", action="store_true", help="禁用DataParallel多GPU训练")
+    parser.add_argument("--gpu_ids", type=int, nargs='+', help="指定使用的GPU ID (例如: --gpu_ids 0 1 2)")
     
     # 其他参数
     parser.add_argument("--resume", type=str, default=None, help="从检查点恢复训练")
@@ -860,6 +931,8 @@ def main():
         config.device = args.device
     
     config.mixed_precision = not args.no_mixed_precision
+    config.use_data_parallel = not args.no_data_parallel
+    config.gpu_ids = args.gpu_ids
     
     # 创建训练器
     trainer = DiffoldTrainer(config)
