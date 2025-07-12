@@ -93,8 +93,8 @@ def write_individual_fasta(pdb_name, sequences, output_dir):
 
 def main():
     # PDB文件目录
-    pdb_dir = "/home/wdcyx/rhofold/RNA3D_DATA/pdb"
-    output_dir = "/home/wdcyx/rhofold/RNA3D_DATA/sequences"
+    pdb_dir = "../processed_data/pdb"
+    output_dir = "../processed_data/sequences"
     
     # 创建输出目录
     os.makedirs(output_dir, exist_ok=True)

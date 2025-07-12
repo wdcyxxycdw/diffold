@@ -777,6 +777,37 @@ class DiffoldTrainer:
             self.writer.add_scalar('LearningRate', current_lr, epoch)
             self.writer.add_scalar('EpochTime', epoch_time, epoch)
             
+            # 计算预计时间
+            current_time = time.time()
+            elapsed_time = current_time - self.start_time
+            
+            # 计算平均epoch时间（使用最近的epoch时间来提高预测准确性）
+            if len(self.metrics.epoch_times) > 0:
+                # 使用最近5个epoch的平均时间，如果不足5个则使用所有的
+                recent_times = self.metrics.epoch_times[-5:]
+                avg_epoch_time = sum(recent_times) / len(recent_times)
+            else:
+                avg_epoch_time = epoch_time
+            
+            # 计算剩余时间
+            remaining_epochs = num_epochs - (epoch + 1)
+            estimated_remaining_time = remaining_epochs * avg_epoch_time
+            estimated_completion_time = current_time + estimated_remaining_time
+            
+            # 格式化时间显示
+            def format_time(seconds):
+                if seconds < 60:
+                    return f"{seconds:.1f}秒"
+                elif seconds < 3600:
+                    minutes = seconds / 60
+                    return f"{minutes:.1f}分钟"
+                else:
+                    hours = seconds / 3600
+                    return f"{hours:.1f}小时"
+            
+            def format_datetime(timestamp):
+                return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+            
             # 打印进度
             log_msg = f"Epoch {epoch+1}/{num_epochs} - "
             log_msg += f"训练损失: {train_loss:.6f}, "
@@ -789,6 +820,12 @@ class DiffoldTrainer:
                 log_msg += " ⭐ 最佳模型!"
             
             logger.info(log_msg)
+            
+            # 显示时间统计信息
+            time_msg = f"⏱️  已用时间: {format_time(elapsed_time)}, "
+            time_msg += f"预计剩余: {format_time(estimated_remaining_time)}, "
+            time_msg += f"预计完成: {format_datetime(estimated_completion_time)}"
+            logger.info(time_msg)
             
             # 保存检查点
             if (epoch + 1) % self.config.save_every == 0:
@@ -831,11 +868,11 @@ def run_small_scale_test():
     # 测试配置
     config = TrainingConfig()
     config.test_mode = True
-    config.test_epochs = 3
-    config.test_samples = 6
-    config.batch_size = 3
-    config.max_sequence_length = 128
-    config.device = "cuda"
+    config.test_epochs = 1
+    config.test_samples = 6  # 改回到6个样本
+    config.batch_size = 2    # 使用batch_size=2，避免单样本问题
+    config.max_sequence_length = 128  # 使用更合理的序列长度
+    config.device = "cpu"
     config.num_workers = 0  # 避免多进程问题
     config.output_dir = "./test_output"
     config.checkpoint_dir = "./test_checkpoints"

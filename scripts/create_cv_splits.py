@@ -276,7 +276,7 @@ def print_statistics(splits: Dict[int, Dict[str, List[str]]]):
 def main():
     """主函数"""
     parser = argparse.ArgumentParser(description="为RNA 3D数据集创建交叉验证分割")
-    parser.add_argument("--data_dir", type=str, default="processed_data",
+    parser.add_argument("--data_dir", type=str, default="../processed_data",
                        help="数据目录路径 (默认: processed_data)")
     parser.add_argument("--n_folds", type=int, default=10,
                        help="交叉验证折数 (默认: 10)")

@@ -1,17 +1,48 @@
 from torch import nn
 import torch
 import os
+from typing import NamedTuple, List
+import torch.nn.functional as F
 
 from alphafold3_pytorch import(
     InputFeatureEmbedder,
     ElucidatedAtomDiffusion,
     DiffusionModule,
     RelativePositionEncoding,
+    ConfidenceHead,
+    ConfidenceHeadLogits,
+    DistogramHead,
+    ComputeAlignmentError,
+)
+from alphafold3_pytorch.alphafold3 import(
+    to_pairwise_mask,
+    masked_average,
+    batch_repeat_interleave,
+    distance_to_dgram,
+    IS_PROTEIN_INDEX,
+    IS_RNA_INDEX,
+    IS_DNA_INDEX,
+    IS_MOLECULE_TYPES,
+    ADDITIONAL_MOLECULE_FEATS
 )
 from alphafold3_pytorch.inputs import NUM_MOLECULE_IDS
 from diffold.input_processor import process_alphafold3_input, process_multiple_alphafold3_inputs
 
 from rhofold.rhofold import RhoFold
+
+# 损失分解类，仿照AlphaFold3的LossBreakdown
+class DiffoldLossBreakdown(NamedTuple):
+    total_loss: torch.Tensor
+    total_diffusion: torch.Tensor
+    distogram: torch.Tensor
+    pae: torch.Tensor
+    pde: torch.Tensor
+    plddt: torch.Tensor
+    resolved: torch.Tensor
+    confidence: torch.Tensor
+    diffusion_mse: torch.Tensor
+    diffusion_bond: torch.Tensor
+    diffusion_smooth_lddt: torch.Tensor
 
 class Diffold(nn.Module):
     def __init__(self, config, rhofold_checkpoint_path=None):
@@ -35,6 +66,26 @@ class Diffold(nn.Module):
         dim_single_inputs = dim_input_embedder_token + dim_additional_token_feats
         lddt_mask_nucleic_acid_cutoff = 30.0
         lddt_mask_other_cutoff = 15.0
+
+        # 置信度相关参数
+        self.num_plddt_bins = 50
+        self.num_pae_bins = 64
+        self.num_pde_bins = 64
+        self.ignore_index = -1
+        
+        # 距离和PAE/PDE的bins（保持为tensor格式）
+        self.register_buffer('distance_bins', torch.linspace(2, 22, 64).float())
+        self.register_buffer('pae_bins', torch.linspace(0.5, 32, 64).float())
+        self.register_buffer('pde_bins', torch.linspace(0.5, 32, 64).float())
+        
+        # LDDT计算相关参数
+        self.lddt_mask_nucleic_acid_cutoff = lddt_mask_nucleic_acid_cutoff
+        self.lddt_mask_other_cutoff = lddt_mask_other_cutoff
+        
+        # 损失权重
+        self.loss_confidence_weight = 1e-4
+        self.loss_distogram_weight = 1e-2
+        self.loss_diffusion_weight = 4.0
 
         self.rhofold = RhoFold(config)
         
@@ -131,9 +182,338 @@ class Diffold(nn.Module):
         self.ligand_loss_weight = 1.0
         
         # 添加维度适配层，将RhoFold的输出调整到diffusion模块期望的维度
-        # RhoFold输出: single_fea [bs, seq_len, 256], pair_fea [bs, seq_len, seq_len, 128]
-        # diffusion期望: single_fea [bs, seq_len, 384], pair_fea [bs, seq_len, seq_len, 128]
-        self.single_dim_adapter = nn.Linear(256, 384)  # 将256维调整到384维
+        self.single_dim_adapter = nn.Linear(256, 384)
+        
+        # 添加置信度头部，仿照AlphaFold3
+        # ConfidenceHead需要列表格式的bins
+        distance_bins_list = torch.linspace(2, 22, 64).float().tolist()
+        self.confidence_head = ConfidenceHead(
+            dim_single_inputs=dim_single_inputs,
+            dim_atom=dim_atom,
+            atompair_dist_bins=distance_bins_list,
+            dim_single=dim_single,
+            dim_pairwise=dim_pairwise,
+            num_plddt_bins=self.num_plddt_bins,
+            num_pde_bins=self.num_pde_bins,
+            num_pae_bins=self.num_pae_bins,
+            pairformer_depth=4,
+            pairformer_kwargs=dict(),
+            checkpoint=False
+        )
+        
+        # 添加 Distogram 头部
+        self.distogram_head = DistogramHead(
+            dim_pairwise=dim_pairwise,
+            num_dist_bins=len(distance_bins_list),
+            dim_atom=dim_atom,
+            atom_resolution=False,  # 在 token 级别预测距离
+            checkpoint=False
+        )
+        
+        # 添加对齐误差计算模块
+        self.compute_alignment_error = ComputeAlignmentError()
+        
+        # LDDT阈值常量
+        self.lddt_threshold_values = [0.5, 1.0, 2.0, 4.0]
+        
+    def _compute_confidence_loss(self, single_fea, single_inputs, pair_fea, denoised_atom_pos, atom_feats,
+                                atom_pos_ground_truth, molecule_atom_indices, molecule_atom_lens,
+                                is_molecule_types, additional_molecule_feats, mask, atom_mask):
+        """计算置信度损失，仿照AlphaFold3的方式"""
+        device = single_fea.device
+        batch_size = single_fea.shape[0]
+        atom_seq_len = atom_feats.shape[1]
+        
+        # 计算置信度头部的输出
+        ch_logits = self.confidence_head(
+            single_repr=single_fea.detach(),
+            single_inputs_repr=single_inputs.detach(),
+            pairwise_repr=pair_fea.detach(),
+            pred_atom_pos=denoised_atom_pos.detach(),
+            atom_feats=atom_feats.detach(),
+            molecule_atom_indices=molecule_atom_indices,
+            molecule_atom_lens=molecule_atom_lens,
+            mask=mask,
+            return_pae_logits=True
+        )
+        
+        # 计算distogram头部的输出
+        distogram_logits = self.distogram_head(
+            pairwise_repr=pair_fea.detach(),
+            molecule_atom_lens=molecule_atom_lens,
+            atom_feats=atom_feats.detach()
+        )
+        
+        # 计算PAE标签
+        pae_labels = self._compute_pae_labels(
+            denoised_atom_pos, atom_pos_ground_truth, molecule_atom_indices, mask
+        )
+        
+        # 计算PDE标签
+        pde_labels = self._compute_pde_labels(
+            denoised_atom_pos, atom_pos_ground_truth, molecule_atom_indices, mask
+        )
+        
+        # 计算pLDDT标签
+        plddt_labels = self._compute_plddt_labels(
+            denoised_atom_pos, atom_pos_ground_truth, is_molecule_types, molecule_atom_lens, atom_mask
+        )
+        
+        # 计算distogram标签
+        distogram_labels = self._compute_distogram_labels(
+            denoised_atom_pos, atom_pos_ground_truth, molecule_atom_indices, mask
+        )
+        
+        # 计算交叉熵损失
+        ignore_index = self.ignore_index
+        label_pairwise_mask = to_pairwise_mask(mask)
+        
+        # PAE损失
+        if ch_logits.pae is not None:
+            # 正确处理PAE logits的形状：[batch, bins, seq, seq] -> [batch, seq, seq, bins]
+            pae_logits_reordered = ch_logits.pae.permute(0, 2, 3, 1)  # [batch, seq, seq, bins]
+            pae_logits_flat = pae_logits_reordered.reshape(-1, pae_logits_reordered.shape[-1])  # [batch*seq*seq, bins]
+            pae_labels_flat = pae_labels.reshape(-1)  # [batch*seq*seq]
+            
+            # 处理标签中的越界值
+            num_pae_bins = pae_logits_flat.shape[-1]
+            pae_labels_flat = torch.clamp(pae_labels_flat, min=0, max=num_pae_bins-1)
+            
+            pae_loss = F.cross_entropy(
+                pae_logits_flat,
+                pae_labels_flat,
+                ignore_index=ignore_index,
+                reduction='mean'
+            )
+        else:
+            pae_loss = torch.tensor(0.0, device=device)
+        
+        # PDE损失
+        if ch_logits.pde is not None:
+            # 正确处理PDE logits的形状：[batch, bins, seq, seq] -> [batch, seq, seq, bins]
+            pde_logits_reordered = ch_logits.pde.permute(0, 2, 3, 1)  # [batch, seq, seq, bins]
+            pde_logits_flat = pde_logits_reordered.reshape(-1, pde_logits_reordered.shape[-1])  # [batch*seq*seq, bins]
+            pde_labels_flat = pde_labels.reshape(-1)  # [batch*seq*seq]
+            
+            # 处理标签中的越界值
+            num_pde_bins = pde_logits_flat.shape[-1]
+            pde_labels_flat = torch.clamp(pde_labels_flat, min=0, max=num_pde_bins-1)
+            
+            pde_loss = F.cross_entropy(
+                pde_logits_flat,
+                pde_labels_flat,
+                ignore_index=ignore_index,
+                reduction='mean'
+            )
+        else:
+            pde_loss = torch.tensor(0.0, device=device)
+        
+        # pLDDT损失
+        if ch_logits.plddt is not None:
+            # pLDDT logits的形状通常是[batch, seq, bins]，应该与[batch, seq]的标签匹配
+            plddt_logits_flat = ch_logits.plddt.reshape(-1, ch_logits.plddt.shape[-1])  # [batch*seq, bins]
+            plddt_labels_flat = plddt_labels.reshape(-1)  # [batch*seq]
+            
+            # 处理标签中的越界值
+            num_plddt_bins = ch_logits.plddt.shape[-1]
+            plddt_labels_flat = torch.clamp(plddt_labels_flat, min=0, max=num_plddt_bins-1)
+            
+            # 如果形状仍然不匹配，使用最小尺寸
+            if plddt_logits_flat.shape[0] != plddt_labels_flat.shape[0]:
+                min_size = min(plddt_logits_flat.shape[0], plddt_labels_flat.shape[0])
+                plddt_logits_flat = plddt_logits_flat[:min_size]
+                plddt_labels_flat = plddt_labels_flat[:min_size]
+            
+            plddt_loss = F.cross_entropy(
+                plddt_logits_flat,
+                plddt_labels_flat,
+                ignore_index=ignore_index,
+                reduction='mean'
+            )
+        else:
+            plddt_loss = torch.tensor(0.0, device=device)
+        
+        # Distogram损失
+        if distogram_logits is not None:
+            # distogram logits的形状通常是[batch, bins, seq, seq]，需要重新排列
+            distogram_logits_reordered = distogram_logits.permute(0, 2, 3, 1)  # [batch, seq, seq, bins]
+            distogram_logits_flat = distogram_logits_reordered.reshape(-1, distogram_logits_reordered.shape[-1])
+            distogram_labels_flat = distogram_labels.reshape(-1)
+            
+            # 处理标签中的越界值
+            num_distogram_bins = distogram_logits_flat.shape[-1]
+            distogram_labels_flat = torch.clamp(distogram_labels_flat, min=0, max=num_distogram_bins-1)
+            
+            distogram_loss = F.cross_entropy(
+                distogram_logits_flat,
+                distogram_labels_flat,
+                ignore_index=ignore_index,
+                reduction='mean'
+            )
+        else:
+            distogram_loss = torch.tensor(0.0, device=device)
+        
+        # Resolved损失（这里简化处理）
+        resolved_loss = torch.mean(ch_logits.resolved * 0.0)
+        
+        # 总置信度损失
+        total_confidence_loss = pae_loss + pde_loss + plddt_loss + resolved_loss
+        
+        confidence_results = {
+            'pae_loss': pae_loss,
+            'pde_loss': pde_loss,
+            'plddt_loss': plddt_loss,
+            'resolved_loss': resolved_loss,
+            'distogram_loss': distogram_loss,
+            'logits': ch_logits,
+            'distogram_logits': distogram_logits
+        }
+        
+        return total_confidence_loss, confidence_results
+    
+    def _compute_pae_labels(self, pred_coords, true_coords, molecule_atom_indices, mask):
+        """计算PAE标签"""
+        device = pred_coords.device
+        batch_size = pred_coords.shape[0]
+        
+
+        # 处理molecule_atom_indices中的-1值
+        # 将-1替换为0，并创建有效索引的mask
+        valid_indices_mask = molecule_atom_indices >= 0
+        safe_indices = torch.where(valid_indices_mask, molecule_atom_indices, 0)
+        
+        # 提取分子位置
+        molecule_pos = pred_coords.gather(1, safe_indices.unsqueeze(-1).expand(-1, -1, 3))
+        true_molecule_pos = true_coords.gather(1, safe_indices.unsqueeze(-1).expand(-1, -1, 3))
+        
+        # 对无效位置进行mask处理
+        valid_mask = valid_indices_mask.unsqueeze(-1).expand(-1, -1, 3)
+        molecule_pos = molecule_pos * valid_mask.float()
+        true_molecule_pos = true_molecule_pos * valid_mask.float()
+        
+        # 计算对齐误差
+        align_error = torch.cdist(molecule_pos, true_molecule_pos, p=2)
+        
+        # 转换为bins
+        pae_labels = distance_to_dgram(align_error, self.pae_bins, return_labels=True)
+        
+        # 应用mask
+        pair_mask = to_pairwise_mask(mask)
+        # 同时考虑有效索引mask
+        valid_pair_mask = valid_indices_mask.unsqueeze(-1) & valid_indices_mask.unsqueeze(-2)
+        final_mask = pair_mask & valid_pair_mask
+        pae_labels = torch.where(final_mask, pae_labels, self.ignore_index)
+        
+        return pae_labels
+    
+    def _compute_pde_labels(self, pred_coords, true_coords, molecule_atom_indices, mask):
+        """计算PDE标签"""
+        device = pred_coords.device
+        
+        # 处理molecule_atom_indices中的-1值
+        # 将-1替换为0，并创建有效索引的mask
+        valid_indices_mask = molecule_atom_indices >= 0
+        safe_indices = torch.where(valid_indices_mask, molecule_atom_indices, 0)
+        
+        # 提取分子位置
+        molecule_pos = pred_coords.gather(1, safe_indices.unsqueeze(-1).expand(-1, -1, 3))
+        true_molecule_pos = true_coords.gather(1, safe_indices.unsqueeze(-1).expand(-1, -1, 3))
+        
+        # 对无效位置进行mask处理
+        valid_mask = valid_indices_mask.unsqueeze(-1).expand(-1, -1, 3)
+        molecule_pos = molecule_pos * valid_mask.float()
+        true_molecule_pos = true_molecule_pos * valid_mask.float()
+        
+        # 计算距离
+        pred_dist = torch.cdist(molecule_pos, molecule_pos, p=2)
+        true_dist = torch.cdist(true_molecule_pos, true_molecule_pos, p=2)
+        
+        # 计算距离误差
+        dist_error = torch.abs(pred_dist - true_dist)
+        
+        # 转换为bins
+        pde_labels = distance_to_dgram(dist_error, self.pde_bins, return_labels=True)
+        
+        # 应用mask
+        pair_mask = to_pairwise_mask(mask)
+        # 同时考虑有效索引mask
+        valid_pair_mask = valid_indices_mask.unsqueeze(-1) & valid_indices_mask.unsqueeze(-2)
+        final_mask = pair_mask & valid_pair_mask
+        pde_labels = torch.where(final_mask, pde_labels, self.ignore_index)
+        
+        return pde_labels
+    
+    def _compute_plddt_labels(self, pred_coords, true_coords, is_molecule_types, molecule_atom_lens, atom_mask):
+        """计算pLDDT标签"""
+        device = pred_coords.device
+        
+        # 计算距离
+        pred_dists = torch.cdist(pred_coords, pred_coords, p=2)
+        true_dists = torch.cdist(true_coords, true_coords, p=2)
+        
+        # 创建inclusion mask
+        is_rna = batch_repeat_interleave(is_molecule_types[..., IS_RNA_INDEX], molecule_atom_lens)
+        is_dna = batch_repeat_interleave(is_molecule_types[..., IS_DNA_INDEX], molecule_atom_lens)
+        is_nucleotide = is_rna | is_dna
+        
+        is_any_nucleotide_pair = is_nucleotide.unsqueeze(-1) | is_nucleotide.unsqueeze(-2)
+        
+        inclusion_radius = torch.where(
+            is_any_nucleotide_pair,
+            true_dists < self.lddt_mask_nucleic_acid_cutoff,
+            true_dists < self.lddt_mask_other_cutoff,
+        )
+        
+        # 计算LDDT
+        dist_diff = torch.abs(true_dists - pred_dists)
+        # 使用预定义的LDDT阈值
+        lddt_thresholds = torch.tensor(self.lddt_threshold_values, device=device)
+        lddt = (dist_diff.unsqueeze(-1) < lddt_thresholds).float().mean(dim=-1)
+        
+        # 应用mask
+        plddt_mask = inclusion_radius & to_pairwise_mask(atom_mask)
+        plddt_mask = plddt_mask & ~torch.eye(pred_coords.shape[1], dtype=torch.bool, device=device)
+        
+        # 计算平均LDDT
+        lddt_mean = masked_average(lddt, plddt_mask, dim=-1)
+        
+        # 转换为bins
+        plddt_labels = torch.clamp(
+            torch.floor(lddt_mean * self.num_plddt_bins).long(),
+            max=self.num_plddt_bins - 1
+        )
+        
+        return plddt_labels
+    
+    def _compute_distogram_labels(self, pred_coords, true_coords, molecule_atom_indices, mask):
+        """计算distogram标签"""
+        device = pred_coords.device
+        
+        # 处理molecule_atom_indices中的-1值
+        valid_indices_mask = molecule_atom_indices >= 0
+        safe_indices = torch.where(valid_indices_mask, molecule_atom_indices, 0)
+        
+        # 提取分子位置
+        molecule_pos = pred_coords.gather(1, safe_indices.unsqueeze(-1).expand(-1, -1, 3))
+        true_molecule_pos = true_coords.gather(1, safe_indices.unsqueeze(-1).expand(-1, -1, 3))
+        
+        # 对无效位置进行mask处理
+        valid_mask = valid_indices_mask.unsqueeze(-1).expand(-1, -1, 3)
+        true_molecule_pos = true_molecule_pos * valid_mask.float()
+        
+        # 计算真实距离
+        true_distances = torch.cdist(true_molecule_pos, true_molecule_pos, p=2)
+        
+        # 转换为bins
+        distogram_labels = distance_to_dgram(true_distances, self.distance_bins, return_labels=True)
+        
+        # 应用mask
+        pair_mask = to_pairwise_mask(mask)
+        valid_pair_mask = valid_indices_mask.unsqueeze(-1) & valid_indices_mask.unsqueeze(-2)
+        final_mask = pair_mask & valid_pair_mask
+        distogram_labels = torch.where(final_mask, distogram_labels, self.ignore_index)
+        
+        return distogram_labels
 
     def freeze_rhofold(self):
         """冻结RhoFold模型参数"""
@@ -438,10 +818,69 @@ class Diffold(nn.Module):
                 ligand_loss_weight = self.ligand_loss_weight,
             )
             
+            # 计算置信度损失（使用修复的molecule_atom_indices）
+            try:
+                # 预处理molecule_atom_indices，将-1替换为0以避免索引越界
+                if af_in.molecule_atom_indices is not None:
+                    safe_molecule_atom_indices = af_in.molecule_atom_indices.clone()
+                    safe_molecule_atom_indices = torch.where(
+                        safe_molecule_atom_indices >= 0,
+                        safe_molecule_atom_indices,
+                        0
+                    )
+                else:
+                    safe_molecule_atom_indices = None
+                
+                # 调用完整的置信度损失计算，使用安全的索引
+                confidence_loss, confidence_logits = self._compute_confidence_loss(
+                    single_fea, single_inputs, pair_fea, denoised_atom_pos, atom_feats,
+                    af_in.atom_pos, safe_molecule_atom_indices, af_in.molecule_atom_lens,
+                    af_in.is_molecule_types, af_in.additional_molecule_feats, mask, atom_mask
+                )
+                
+            except Exception as e:
+                print(f"WARNING: 置信度损失计算失败: {e}")
+                import traceback
+                traceback.print_exc()
+                
+                # 回退到简单损失
+                confidence_loss = torch.tensor(0.0, device=diffusion_loss.device)
+                confidence_logits = {
+                    'pae_loss': torch.tensor(0.0, device=diffusion_loss.device),
+                    'pde_loss': torch.tensor(0.0, device=diffusion_loss.device),
+                    'plddt_loss': torch.tensor(0.0, device=diffusion_loss.device),
+                    'resolved_loss': torch.tensor(0.0, device=diffusion_loss.device),
+                    'logits': None
+                }
+            
+            # 计算总损失
+            distogram_loss = confidence_logits.get('distogram_loss', torch.tensor(0.0, device=diffusion_loss.device))
+            total_loss = (diffusion_loss * self.loss_diffusion_weight + 
+                         confidence_loss * self.loss_confidence_weight + 
+                         distogram_loss * self.loss_distogram_weight)
+            
+            # 创建详细的损失分解
+            zero_tensor = torch.tensor(0.0, device=diffusion_loss.device)
+            loss_breakdown = DiffoldLossBreakdown(
+                total_loss=total_loss,
+                total_diffusion=diffusion_loss,
+                distogram=distogram_loss,
+                pae=confidence_logits.get('pae_loss', zero_tensor),
+                pde=confidence_logits.get('pde_loss', zero_tensor),
+                plddt=confidence_logits.get('plddt_loss', zero_tensor),
+                resolved=confidence_logits.get('resolved_loss', zero_tensor),
+                confidence=confidence_loss,
+                diffusion_mse=diffusion_loss_breakdown.diffusion_mse,
+                diffusion_bond=diffusion_loss_breakdown.diffusion_bond,
+                diffusion_smooth_lddt=diffusion_loss_breakdown.diffusion_smooth_lddt,
+            )
+            
             return {
-                'loss': diffusion_loss,
+                'loss': total_loss,
                 'predicted_coords': denoised_atom_pos,
-                'loss_breakdown': diffusion_loss_breakdown,
+                'loss_breakdown': loss_breakdown,
+                'confidence_logits': confidence_logits.get('logits', None),
+                'distogram_logits': confidence_logits.get('distogram_logits', None),
                 'atom_mask': atom_mask,
                 'mode': 'supervised'
             }
