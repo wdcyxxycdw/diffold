@@ -1054,6 +1054,7 @@ def run_small_scale_test():
         print(f"📁 输出目录: {config.output_dir}")
         print(f"📁 检查点目录: {config.checkpoint_dir}")
         
+        exit()
     except Exception as e:
         print(f"❌ 小规模测试失败: {e}")
         import traceback
