@@ -780,6 +780,144 @@ class RNA3DDataLoader:
         """获取验证数据加载器"""
         return self.get_dataloader(fold=fold, split="valid", shuffle=False)
     
+    def get_all_folds_dataloaders(self) -> Dict[int, Dict[str, DataLoader]]:
+        """
+        获取所有折数的数据加载器
+        
+        Returns:
+            Dict[int, Dict[str, DataLoader]]: 例如 {0: {'train': DataLoader, 'valid': DataLoader}}
+        """
+        all_loaders = {}
+        for fold in range(10):  # 假设有10个折数
+            try:
+                train_loader = self.get_train_dataloader(fold)
+                valid_loader = self.get_valid_dataloader(fold)
+                all_loaders[fold] = {'train': train_loader, 'valid': valid_loader}
+            except Exception as e:
+                logger.warning(f"跳过Fold {fold}: {e}")
+                continue
+        return all_loaders
+
+
+def create_data_loaders(
+    data_dir: str,
+    batch_size: int = 4,
+    max_length: int = 512,
+    num_workers: int = 4,
+    fold: int = 0,
+    use_msa: bool = True,
+    use_all_folds: bool = False,
+    cache_dir: Optional[str] = None,
+    force_reload: bool = False
+) -> Tuple[DataLoader, DataLoader]:
+    """
+    便利函数：一次性创建训练和验证数据加载器
+    
+    Args:
+        data_dir: 数据目录
+        batch_size: 批次大小
+        max_length: 最大序列长度
+        num_workers: 数据加载进程数
+        fold: 交叉验证折数
+        use_msa: 是否使用MSA
+        use_all_folds: 是否使用所有折数的数据
+        cache_dir: 缓存目录
+        force_reload: 是否强制重新加载数据
+        
+    Returns:
+        (train_loader, valid_loader): 训练和验证数据加载器
+    """
+    logger.info(f"创建数据加载器 - fold: {fold}, batch_size: {batch_size}, max_length: {max_length}")
+    
+    if use_all_folds:
+        # 使用所有折数的数据
+        logger.info("使用所有折数的训练数据...")
+        
+        data_loader = RNA3DDataLoader(
+            data_dir=data_dir,
+            batch_size=batch_size,
+            max_length=max_length,
+            use_msa=use_msa,
+            num_workers=num_workers,
+            cache_dir=cache_dir,
+            force_reload=force_reload,
+            enable_missing_atom_mask=True
+        )
+        
+        all_loaders = data_loader.get_all_folds_dataloaders()
+        
+        # 合并所有折数的训练数据加载器
+        from torch.utils.data import ConcatDataset
+        
+        all_train_datasets = []
+        all_valid_datasets = []
+        
+        for fold_num, loaders in all_loaders.items():
+            train_dataset = loaders['train'].dataset
+            valid_dataset = loaders['valid'].dataset
+            all_train_datasets.append(train_dataset)
+            all_valid_datasets.append(valid_dataset)
+            
+            # 安全获取数据集大小
+            if hasattr(train_dataset, '__len__') and hasattr(valid_dataset, '__len__'):
+                train_size = len(train_dataset)
+                valid_size = len(valid_dataset)
+                logger.info(f"Fold {fold_num}: 训练样本 {train_size}, 验证样本 {valid_size}")
+            else:
+                logger.info(f"Fold {fold_num}: 已添加到合并数据集")
+        
+        # 合并数据集
+        combined_train_dataset = ConcatDataset(all_train_datasets)
+        combined_valid_dataset = ConcatDataset(all_valid_datasets)
+        
+        # 创建新的数据加载器
+        train_loader = DataLoader(
+            combined_train_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            collate_fn=collate_fn,
+            pin_memory=True
+        )
+        
+        valid_loader = DataLoader(
+            combined_valid_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            collate_fn=collate_fn,
+            pin_memory=True
+        )
+        
+        logger.info(f"合并后训练样本数: {len(combined_train_dataset)}")
+        logger.info(f"合并后验证样本数: {len(combined_valid_dataset)}")
+        
+    else:
+        # 使用单个折数的数据
+        data_loader = RNA3DDataLoader(
+            data_dir=data_dir,
+            batch_size=batch_size,
+            max_length=max_length,
+            use_msa=use_msa,
+            num_workers=num_workers,
+            cache_dir=cache_dir,
+            force_reload=force_reload,
+            enable_missing_atom_mask=True
+        )
+        
+        train_loader = data_loader.get_train_dataloader(fold=fold)
+        valid_loader = data_loader.get_valid_dataloader(fold=fold)
+        
+        # 安全获取数据集大小
+        if hasattr(train_loader.dataset, '__len__'):
+            train_size = len(train_loader.dataset)
+            logger.info(f"Fold {fold} - 训练样本数: {train_size}")
+        
+        if hasattr(valid_loader.dataset, '__len__'):
+            valid_size = len(valid_loader.dataset)
+            logger.info(f"Fold {fold} - 验证样本数: {valid_size}")
+    
+    return train_loader, valid_loader
 
 
 # 使用示例和测试函数

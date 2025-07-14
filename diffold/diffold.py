@@ -27,6 +27,7 @@ from alphafold3_pytorch.alphafold3 import(
 )
 from alphafold3_pytorch.inputs import NUM_MOLECULE_IDS
 from diffold.input_processor import process_alphafold3_input, process_multiple_alphafold3_inputs
+from diffold.mask_validator import MaskValidator, validate_batch_for_edm
 
 from rhofold.rhofold import RhoFold
 
@@ -87,7 +88,9 @@ class Diffold(nn.Module):
         self.loss_distogram_weight = 1e-2
         self.loss_diffusion_weight = 4.0
 
-        self.rhofold = RhoFold(config)
+        # 使用 RhoFold 自带的配置
+        from rhofold.config import rhofold_config
+        self.rhofold = RhoFold(rhofold_config)
         
         # 加载RhoFold预训练权重
         if rhofold_checkpoint_path is None:
@@ -215,6 +218,13 @@ class Diffold(nn.Module):
         
         # LDDT阈值常量
         self.lddt_threshold_values = [0.5, 1.0, 2.0, 4.0]
+        
+        # 添加mask验证器
+        self.mask_validator = MaskValidator(
+            enable_warnings=True,
+            enable_logging=True,
+            strict_mode=True  # 在生产环境中可以设为True
+        )
         
     def _compute_confidence_loss(self, single_fea, single_inputs, pair_fea, denoised_atom_pos, atom_feats,
                                 atom_pos_ground_truth, molecule_atom_indices, molecule_atom_lens,
@@ -630,9 +640,6 @@ class Diffold(nn.Module):
             if self.training:
                 print("⚠️ 训练模式但没有目标坐标")
                 return None, None, None
-
-        print("RhoFold输出:", single_fea.shape, pair_fea.shape)
-
         
         # 处理target_coords，将batch张量转换为列表格式
         atom_pos_list = None
@@ -793,6 +800,51 @@ class Diffold(nn.Module):
         if has_ground_truth:
             # 有ground truth：计算损失（无论training还是eval模式）
             print(f"计算损失 - 模式: {'训练' if self.training else '验证'}")
+            
+            # 🔍 验证batch数据一致性（在训练模式下）
+            if self.training and hasattr(self, 'mask_validator') and missing_atom_mask is not None:
+                try:
+                    # 只有在有必要数据时才进行验证
+                    if target_coords is not None and seq is not None:
+                        batch_validation = self.mask_validator.validate_batch_consistency(
+                            tokens=tokens,
+                            sequences=seq,
+                            coordinates=target_coords,
+                            missing_atom_mask=missing_atom_mask,
+                            seq_lengths=seq_lengths
+                        )
+                        
+                        # 验证EDM输入的mask一致性
+                        edm_validation = self.mask_validator.validate_edm_inputs(
+                            atom_mask=atom_mask,
+                            missing_atom_mask=missing_atom_mask,
+                            molecule_atom_lens=af_in.molecule_atom_lens,
+                            mask=mask
+                        )
+                        
+                        # 如果有严重问题，记录警告
+                        if not batch_validation['is_valid'] or not edm_validation['is_valid']:
+                            print(f"⚠️ Mask验证发现问题:")
+                            for error in batch_validation.get('errors', []) + edm_validation.get('errors', []):
+                                print(f"  - {error}")
+                            
+                            # 在严格模式下可能会抛出异常，这里只记录
+                            if len(batch_validation.get('errors', [])) > 0:
+                                print(f"  batch验证错误数: {len(batch_validation['errors'])}")
+                            if len(edm_validation.get('errors', [])) > 0:
+                                print(f"  EDM输入验证错误数: {len(edm_validation['errors'])}")
+                        
+                        # 记录统计信息（可选）
+                        if batch_validation.get('statistics'):
+                            stats = batch_validation['statistics']
+                            if 'seq_length_variance' in stats and stats['seq_length_variance'] > 0:
+                                print(f"  序列长度差异: {stats['seq_length_variance']}")
+                            if 'avg_atom_coverage' in stats:
+                                print(f"  平均原子覆盖率: {stats['avg_atom_coverage']:.2%}")
+                
+                except Exception as e:
+                    print(f"⚠️ Mask验证过程出错: {e}")
+                    # 验证失败不应该影响训练，继续执行
             
             diffusion_loss, denoised_atom_pos, diffusion_loss_breakdown, _ = self.edm(
                 atom_pos_ground_truth = af_in.atom_pos,
