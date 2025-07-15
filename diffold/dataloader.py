@@ -740,7 +740,8 @@ class RNA3DDataLoader:
         self, 
         fold: int = 0, 
         split: str = "train", 
-        shuffle: bool = True
+        shuffle: bool = True,
+        sampler=None
     ) -> DataLoader:
         """
         获取指定fold和split的数据加载器
@@ -749,6 +750,7 @@ class RNA3DDataLoader:
             fold: 交叉验证折数 (0-9)
             split: 数据分割 ("train", "valid")
             shuffle: 是否随机打乱
+            sampler: 可选的采样器
             
         Returns:
             PyTorch DataLoader对象
@@ -766,19 +768,20 @@ class RNA3DDataLoader:
         return DataLoader(
             dataset,
             batch_size=self.batch_size,
-            shuffle=shuffle,
+            shuffle=(sampler is None and shuffle),
+            sampler=sampler,
             num_workers=self.num_workers,
             collate_fn=collate_fn,
             pin_memory=True
         )
     
-    def get_train_dataloader(self, fold: int = 0) -> DataLoader:
+    def get_train_dataloader(self, fold: int = 0, sampler=None) -> DataLoader:
         """获取训练数据加载器"""
-        return self.get_dataloader(fold=fold, split="train", shuffle=True)
+        return self.get_dataloader(fold=fold, split="train", shuffle=True, sampler=sampler)
     
-    def get_valid_dataloader(self, fold: int = 0) -> DataLoader:
+    def get_valid_dataloader(self, fold: int = 0, sampler=None) -> DataLoader:
         """获取验证数据加载器"""
-        return self.get_dataloader(fold=fold, split="valid", shuffle=False)
+        return self.get_dataloader(fold=fold, split="valid", shuffle=False, sampler=sampler)
     
     def get_all_folds_dataloaders(self) -> Dict[int, Dict[str, DataLoader]]:
         """
@@ -808,7 +811,9 @@ def create_data_loaders(
     use_msa: bool = True,
     use_all_folds: bool = False,
     cache_dir: Optional[str] = None,
-    force_reload: bool = False
+    force_reload: bool = False,
+    world_size: int = 1,
+    local_rank: int = 0
 ) -> Tuple[DataLoader, DataLoader]:
     """
     便利函数：一次性创建训练和验证数据加载器
@@ -871,19 +876,28 @@ def create_data_loaders(
         combined_valid_dataset = ConcatDataset(all_valid_datasets)
         
         # 创建新的数据加载器
+        from torch.utils.data import DataLoader
+        if world_size > 1:
+            from torch.utils.data.distributed import DistributedSampler
+            train_sampler = DistributedSampler(combined_train_dataset, num_replicas=world_size, rank=local_rank, shuffle=True, drop_last=True)
+            valid_sampler = DistributedSampler(combined_valid_dataset, num_replicas=world_size, rank=local_rank, shuffle=False, drop_last=False)
+        else:
+            train_sampler = None
+            valid_sampler = None
         train_loader = DataLoader(
             combined_train_dataset,
             batch_size=batch_size,
-            shuffle=True,
+            shuffle=(train_sampler is None),
+            sampler=train_sampler,
             num_workers=num_workers,
             collate_fn=collate_fn,
             pin_memory=True
         )
-        
         valid_loader = DataLoader(
             combined_valid_dataset,
             batch_size=batch_size,
-            shuffle=False,
+            shuffle=(valid_sampler is None),
+            sampler=valid_sampler,
             num_workers=num_workers,
             collate_fn=collate_fn,
             pin_memory=True
@@ -905,8 +919,34 @@ def create_data_loaders(
             enable_missing_atom_mask=True
         )
         
-        train_loader = data_loader.get_train_dataloader(fold=fold)
-        valid_loader = data_loader.get_valid_dataloader(fold=fold)
+        from torch.utils.data import DataLoader
+        if world_size > 1:
+            from torch.utils.data.distributed import DistributedSampler
+            train_dataset = data_loader.get_train_dataloader(fold=fold).dataset
+            valid_dataset = data_loader.get_valid_dataloader(fold=fold).dataset
+            train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=local_rank, shuffle=True, drop_last=True)
+            valid_sampler = DistributedSampler(valid_dataset, num_replicas=world_size, rank=local_rank, shuffle=False, drop_last=False)
+            train_loader = DataLoader(
+                train_dataset,
+                batch_size=batch_size,
+                shuffle=False,
+                sampler=train_sampler,
+                num_workers=num_workers,
+                collate_fn=collate_fn,
+                pin_memory=True
+            )
+            valid_loader = DataLoader(
+                valid_dataset,
+                batch_size=batch_size,
+                shuffle=False,
+                sampler=valid_sampler,
+                num_workers=num_workers,
+                collate_fn=collate_fn,
+                pin_memory=True
+            )
+        else:
+            train_loader = data_loader.get_train_dataloader(fold=fold)
+            valid_loader = data_loader.get_valid_dataloader(fold=fold)
         
         # 安全获取数据集大小
         if hasattr(train_loader.dataset, '__len__'):

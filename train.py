@@ -356,7 +356,7 @@ class DiffoldTrainer:
         if self.is_main_process:
             logger.info("设置数据加载器...")
         
-        # 创建基础数据加载器
+        # 创建基础数据加载器，传递分布式信息
         train_loader, valid_loader = create_data_loaders(
             data_dir=self.config.data_dir,
             batch_size=self.config.batch_size,
@@ -364,14 +364,10 @@ class DiffoldTrainer:
             num_workers=self.config.num_workers,
             fold=self.config.fold,
             use_msa=self.config.use_msa,
-            use_all_folds=self.config.use_all_folds
+            use_all_folds=self.config.use_all_folds,
+            world_size=self.world_size,
+            local_rank=self.local_rank
         )
-        # DDP: 替换为DistributedSampler
-        if self.world_size > 1:
-            from torch.utils.data.distributed import DistributedSampler
-            train_loader.sampler = DistributedSampler(train_loader.dataset, num_replicas=self.world_size, rank=self.local_rank, shuffle=True, drop_last=True)
-            valid_loader.sampler = DistributedSampler(valid_loader.dataset, num_replicas=self.world_size, rank=self.local_rank, shuffle=False, drop_last=False)
-        
         # 🔥 应用数据加载优化
         if (self.enhanced_enabled and 
             self.config.enhanced_features['dataloader']['enable_prefetch']):
