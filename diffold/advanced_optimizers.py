@@ -46,7 +46,12 @@ class WarmupLRScheduler(_LRScheduler):
         # 保存初始学习率
         self.base_lrs = [group['lr'] for group in optimizer.param_groups]
         
-        super().__init__(optimizer, last_epoch, verbose)
+        # 兼容不同版本的PyTorch
+        try:
+            super().__init__(optimizer, last_epoch, verbose)
+        except TypeError:
+            # 新版本PyTorch不支持verbose参数
+            super().__init__(optimizer, last_epoch)
     
     def get_lr(self):
         if self.last_epoch < self.warmup_epochs:
