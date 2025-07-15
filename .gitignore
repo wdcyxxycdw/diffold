@@ -7,3 +7,7 @@ processed_data/*
 .venv
 .vscode
 DS_Store
+data*
+filter_summary.txt
+mismatch_report.txt
+*.log

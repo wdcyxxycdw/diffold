@@ -269,9 +269,9 @@ def main():
     """主函数"""
     parser = argparse.ArgumentParser(description="检查MSA文件与序列文件的长度匹配")
     
-    parser.add_argument("--data_dir", type=str, default="./RNA3D_DATA", 
+    parser.add_argument("--data_dir", type=str, default="../processed_data", 
                        help="数据目录路径 (默认: ./RNA3D_DATA)")
-    parser.add_argument("--target_dir", type=str, default="mismatched_msa",
+    parser.add_argument("--target_dir", type=str, default="../processed_data/mismatched_msa",
                        help="不匹配文件的目标目录名 (默认: mismatched_msa)")
     parser.add_argument("--tolerance", type=int, default=0,
                        help="允许的长度差异容忍度 (默认: 0)")

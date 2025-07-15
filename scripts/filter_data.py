@@ -471,9 +471,9 @@ def main():
     """主函数"""
     parser = argparse.ArgumentParser(description="根据序列长度筛选RNA数据并进行去冗余")
     
-    parser.add_argument("--input_dir", type=str, default="./RNA3D_DATA", 
+    parser.add_argument("--input_dir", type=str, default="../RNA3D_DATA", 
                        help="输入数据目录路径 (默认: ./RNA3D_DATA)")
-    parser.add_argument("--output_dir", type=str, default="./processed_data",
+    parser.add_argument("--output_dir", type=str, default="../processed_data",
                        help="输出数据目录路径 (默认: ./processed_data)")
     parser.add_argument("--min_length", type=int, default=16,
                        help="最小序列长度 (默认: 16)")
