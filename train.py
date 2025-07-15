@@ -16,6 +16,9 @@ import torch
 import torch.nn as nn
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+import os
 
 # 导入模型和数据处理
 from diffold.diffold import Diffold
@@ -216,19 +219,29 @@ class TrainingMetrics:
 class DiffoldTrainer:
     """Diffold模型训练器 - 增强版"""
     
-    def __init__(self, config: TrainingConfig):
+    def __init__(self, config: TrainingConfig, local_rank: int = 0, world_size: int = 1):
         self.config = config
         self.metrics = TrainingMetrics()
         
         # 创建输出目录
-        self.setup_directories()
+        self.local_rank = local_rank
+        self.world_size = world_size
+        self.is_main_process = (self.local_rank == 0)
+        if self.is_main_process:
+            self.setup_directories()
         
         # 设置日志
-        self.setup_logging()
+        if self.is_main_process:
+            self.setup_logging()
         
         # 初始化设备
-        self.device = torch.device(config.device)
-        logger.info(f"使用设备: {self.device}")
+        if world_size > 1:
+            torch.cuda.set_device(local_rank)
+            self.device = torch.device(f"cuda:{local_rank}")
+        else:
+            self.device = torch.device(config.device)
+        if self.is_main_process:
+            logger.info(f"使用设备: {self.device}")
         
         # 🔥 初始化增强功能
         self.enhanced_enabled = config.enhanced_features.get('enable_enhanced_training', False)
@@ -241,6 +254,14 @@ class DiffoldTrainer:
         
         # 初始化模型
         self.model = self.setup_model()
+        if world_size > 1:
+            self.model = DDP(self.model.to(self.device), device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
+            self.using_ddp = True
+            self.num_gpus = world_size
+        else:
+            self.model = self.model.to(self.device)
+            self.using_ddp = False
+            self.num_gpus = 1
         
         # 初始化数据加载器
         self.setup_data_loaders()
@@ -249,12 +270,14 @@ class DiffoldTrainer:
         self.setup_optimizer_and_scheduler()
         
         # 初始化tensorboard
-        self.writer = SummaryWriter(log_dir=self.config.output_dir / "tensorboard")
+        if self.is_main_process:
+            self.writer = SummaryWriter(log_dir=str(self.config.output_dir) + "/tensorboard")
         
         # 混合精度训练
         if self.config.mixed_precision and self.device.type == 'cuda':
             self.scaler = torch.cuda.amp.GradScaler()
-            logger.info("启用混合精度训练")
+            if self.is_main_process:
+                logger.info("启用混合精度训练")
         else:
             self.scaler = None
         
@@ -330,7 +353,8 @@ class DiffoldTrainer:
     
     def setup_data_loaders(self):
         """设置数据加载器"""
-        logger.info("设置数据加载器...")
+        if self.is_main_process:
+            logger.info("设置数据加载器...")
         
         # 创建基础数据加载器
         train_loader, valid_loader = create_data_loaders(
@@ -342,11 +366,17 @@ class DiffoldTrainer:
             use_msa=self.config.use_msa,
             use_all_folds=self.config.use_all_folds
         )
+        # DDP: 替换为DistributedSampler
+        if self.world_size > 1:
+            from torch.utils.data.distributed import DistributedSampler
+            train_loader.sampler = DistributedSampler(train_loader.dataset, num_replicas=self.world_size, rank=self.local_rank, shuffle=True, drop_last=True)
+            valid_loader.sampler = DistributedSampler(valid_loader.dataset, num_replicas=self.world_size, rank=self.local_rank, shuffle=False, drop_last=False)
         
         # 🔥 应用数据加载优化
         if (self.enhanced_enabled and 
             self.config.enhanced_features['dataloader']['enable_prefetch']):
-            logger.info("🚀 启用数据预取优化")
+            if self.is_main_process:
+                logger.info("🚀 启用数据预取优化")
             
             self.train_loader = DataLoaderOptimizer(
                 train_loader,
@@ -363,8 +393,9 @@ class DiffoldTrainer:
             self.train_loader = train_loader
             self.valid_loader = valid_loader
         
-        logger.info(f"训练集大小: {len(train_loader)}")
-        logger.info(f"验证集大小: {len(valid_loader)}")
+        if self.is_main_process:
+            logger.info(f"训练集大小: {len(train_loader)}")
+            logger.info(f"验证集大小: {len(valid_loader)}")
     
     def setup_optimizer_and_scheduler(self):
         """设置优化器和调度器"""
@@ -424,7 +455,7 @@ class DiffoldTrainer:
     def train_one_epoch(self, epoch: int) -> float:
         """训练一个epoch"""
         # 兼容DataParallel
-        if self.using_data_parallel:
+        if self.using_ddp:
             self.model.module.set_train_mode()
         else:
             self.model.set_train_mode()
@@ -599,7 +630,7 @@ class DiffoldTrainer:
             if self.scaler is not None:
                 self.scaler.scale(loss).backward()
                 self.scaler.unscale_(self.optimizer)
-                if self.using_data_parallel:
+                if self.using_ddp:
                     torch.nn.utils.clip_grad_norm_(self.model.module.get_trainable_parameters(), self.config.grad_clip_norm)
                 else:
                     torch.nn.utils.clip_grad_norm_(self.model.get_trainable_parameters(), self.config.grad_clip_norm)
@@ -607,7 +638,7 @@ class DiffoldTrainer:
                 self.scaler.update()
             else:
                 loss.backward()
-                if self.using_data_parallel:
+                if self.using_ddp:
                     torch.nn.utils.clip_grad_norm_(self.model.module.get_trainable_parameters(), self.config.grad_clip_norm)
                 else:
                     torch.nn.utils.clip_grad_norm_(self.model.get_trainable_parameters(), self.config.grad_clip_norm)
@@ -618,7 +649,7 @@ class DiffoldTrainer:
     def validate(self, epoch: int) -> float:
         """验证模型"""
         # 兼容DataParallel
-        if self.using_data_parallel:
+        if self.using_ddp:
             self.model.module.set_eval_mode()
         else:
             self.model.set_eval_mode()
@@ -709,7 +740,7 @@ class DiffoldTrainer:
     def save_checkpoint(self, epoch: int, is_best: bool = False):
         """保存检查点"""
         # 处理DataParallel的state_dict
-        if self.using_data_parallel:
+        if self.using_ddp:
             model_state_dict = self.model.module.state_dict()
         else:
             model_state_dict = self.model.state_dict()
@@ -722,7 +753,7 @@ class DiffoldTrainer:
             'metrics': self.metrics.to_dict(),
             'config': self.config.__dict__,
             'scaler_state_dict': self.scaler.state_dict() if self.scaler else None,
-            'using_data_parallel': self.using_data_parallel,
+            'using_data_parallel': self.using_ddp,
             'num_gpus': self.num_gpus,
             'enhanced_enabled': self.enhanced_enabled
         }
@@ -769,7 +800,7 @@ class DiffoldTrainer:
         
         # 加载模型状态（处理DataParallel）
         model_state_dict = checkpoint['model_state_dict']
-        if self.using_data_parallel:
+        if self.using_ddp:
             self.model.module.load_state_dict(model_state_dict)
         else:
             self.model.load_state_dict(model_state_dict)
@@ -851,16 +882,18 @@ class DiffoldTrainer:
     
     def train(self, resume_from: Optional[str] = None):
         """主训练循环"""
-        logger.info("开始训练...")
+        if self.is_main_process:
+            logger.info("开始训练...")
         
         # 🔥 打印增强功能状态
         if self.enhanced_enabled:
-            logger.info("🔥 增强功能已启用:")
-            for category, features in self.config.enhanced_features.items():
-                if isinstance(features, dict):
-                    enabled_features = [k for k, v in features.items() if v]
-                    if enabled_features:
-                        logger.info(f"  {category}: {', '.join(enabled_features)}")
+            if self.is_main_process:
+                logger.info("🔥 增强功能已启用:")
+                for category, features in self.config.enhanced_features.items():
+                    if isinstance(features, dict):
+                        enabled_features = [k for k, v in features.items() if v]
+                        if enabled_features:
+                            logger.info(f"  {category}: {', '.join(enabled_features)}")
         
         # 加载检查点（如果指定）
         start_epoch = 0
@@ -908,15 +941,16 @@ class DiffoldTrainer:
                 train_metrics = self.enhanced_metrics['train'].compute_metrics()
                 val_metrics = self.enhanced_metrics['val'].compute_metrics() if valid_loss is not None else {}
                 
-                if 'avg_rmsd' in val_metrics:
+                if 'avg_rmsd' in val_metrics and self.is_main_process:
                     logger.info(f"验证RMSD: {val_metrics['avg_rmsd']:.4f}")
             
-            # 记录到tensorboard
-            self.writer.add_scalar('Loss/Train', train_loss, epoch)
-            if valid_loss is not None:
-                self.writer.add_scalar('Loss/Valid', valid_loss, epoch)
-            self.writer.add_scalar('LearningRate', current_lr, epoch)
-            self.writer.add_scalar('EpochTime', epoch_time, epoch)
+            # 只在主进程写tensorboard
+            if self.is_main_process:
+                self.writer.add_scalar('Loss/Train', train_loss, epoch)
+                if valid_loss is not None:
+                    self.writer.add_scalar('Loss/Valid', valid_loss, epoch)
+                self.writer.add_scalar('LearningRate', current_lr, epoch)
+                self.writer.add_scalar('EpochTime', epoch_time, epoch)
             
             # 计算预计时间
             current_time = time.time()
@@ -949,84 +983,79 @@ class DiffoldTrainer:
                 return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
             
             # 打印进度
-            log_msg = f"Epoch {epoch+1}/{num_epochs} - "
-            log_msg += f"训练损失: {train_loss:.6f}, "
-            if valid_loss is not None:
-                log_msg += f"验证损失: {valid_loss:.6f}, "
-            log_msg += f"学习率: {current_lr:.2e}, "
-            log_msg += f"时间: {epoch_time:.1f}s"
-            
-            if is_best:
-                log_msg += " ⭐ 最佳模型!"
-            
-            logger.info(log_msg)
-            
-            # 显示时间统计信息
-            time_msg = f"⏱️  已用时间: {format_time(elapsed_time)}, "
-            time_msg += f"预计剩余: {format_time(estimated_remaining_time)}, "
-            time_msg += f"预计完成: {format_datetime(estimated_completion_time)}"
-            logger.info(time_msg)
+            if self.is_main_process:
+                log_msg = f"Epoch {epoch+1}/{num_epochs} - "
+                log_msg += f"训练损失: {train_loss:.6f}, "
+                if valid_loss is not None:
+                    log_msg += f"验证损失: {valid_loss:.6f}, "
+                log_msg += f"学习率: {current_lr:.2e}, "
+                log_msg += f"时间: {epoch_time:.1f}s"
+                if is_best:
+                    log_msg += " ⭐ 最佳模型!"
+                logger.info(log_msg)
+                # 显示时间统计信息
+                time_msg = f"⏱️  已用时间: {format_time(elapsed_time)}, "
+                time_msg += f"预计剩余: {format_time(estimated_remaining_time)}, "
+                time_msg += f"预计完成: {format_datetime(estimated_completion_time)}"
+                logger.info(time_msg)
             
             # 保存检查点
-            if (epoch + 1) % self.config.save_every == 0:
-                self.save_checkpoint(epoch, is_best)
-            
-            # 绘制训练曲线
-            if (epoch + 1) % (self.config.save_every * 2) == 0:
-                self.plot_training_curves()
-            
-            # 🔥 保存监控报告
-            if (self.training_monitor and 
-                self.config.enhanced_features['monitoring']['save_monitoring_plots'] and
-                (epoch + 1) % 5 == 0):
-                self.training_monitor.save_monitoring_report()
-                self.training_monitor.generate_performance_plots()
+            if self.is_main_process:
+                if (epoch + 1) % self.config.save_every == 0:
+                    self.save_checkpoint(epoch, is_best)
+                # 绘制训练曲线
+                if (epoch + 1) % (self.config.save_every * 2) == 0:
+                    self.plot_training_curves()
+                # 🔥 保存监控报告
+                if (self.training_monitor and 
+                    self.config.enhanced_features['monitoring']['save_monitoring_plots'] and
+                    (epoch + 1) % 5 == 0):
+                    self.training_monitor.save_monitoring_report()
+                    self.training_monitor.generate_performance_plots()
             
             # 早停检查
             if (self.metrics.early_stopping_counter >= self.config.early_stopping_patience 
                 and not self.config.test_mode):
-                logger.info(f"早停触发 (patience={self.config.early_stopping_patience})")
+                if self.is_main_process:
+                    logger.info(f"早停触发 (patience={self.config.early_stopping_patience})")
                 break
         
         # 训练结束
         total_time = time.time() - self.start_time
-        logger.info("="*60)
-        logger.info("训练完成!")
-        logger.info(f"总训练时间: {total_time/3600:.2f} 小时")
-        logger.info(f"最佳验证损失: {self.metrics.best_valid_loss:.6f} (Epoch {self.metrics.best_epoch+1})")
-        
-        # 🔥 显示增强功能统计
-        if self.enhanced_optimizer:
-            stats = self.enhanced_optimizer.get_stats()
-            logger.info(f"优化器统计: 更新次数={stats.get('update_count', 0)}, "
-                       f"平均梯度范数={stats.get('avg_grad_norm', 0):.4f}")
-        
-        if self.training_monitor:
-            logger.info("性能监控报告:")
-            summary = self.training_monitor.performance_monitor.get_performance_summary()
-            logger.info(f"  总batch数: {summary.get('total_batches', 0)}")
-            logger.info(f"  OOM次数: {summary.get('oom_count', 0)}")
-            logger.info(f"  NaN损失次数: {summary.get('nan_loss_count', 0)}")
-            if 'avg_batch_time' in summary:
-                logger.info(f"  平均batch时间: {summary['avg_batch_time']:.2f}s")
-        
-        logger.info("="*60)
-        
-        # 最终保存
-        self.save_checkpoint(epoch, False)
-        self.plot_training_curves()
-        
-        # 🔥 最终报告
-        if self.training_monitor:
-            self.training_monitor.save_monitoring_report()
-            self.training_monitor.generate_performance_plots()
-        
-        # 保存训练指标
-        metrics_path = self.config.output_dir / "training_metrics.json"
-        with open(metrics_path, 'w', encoding='utf-8') as f:
-            json.dump(self.metrics.to_dict(), f, indent=2, ensure_ascii=False)
-        
-        self.writer.close()
+        if self.is_main_process:
+            logger.info("="*60)
+            logger.info("训练完成!")
+            logger.info(f"总训练时间: {total_time/3600:.2f} 小时")
+            logger.info(f"最佳验证损失: {self.metrics.best_valid_loss:.6f} (Epoch {self.metrics.best_epoch+1})")
+            # 🔥 显示增强功能统计
+            if self.enhanced_optimizer:
+                stats = self.enhanced_optimizer.get_stats()
+                logger.info(f"优化器统计: 更新次数={stats.get('update_count', 0)}, "
+                           f"平均梯度范数={stats.get('avg_grad_norm', 0):.4f}")
+            if self.training_monitor:
+                logger.info("性能监控报告:")
+                summary = self.training_monitor.performance_monitor.get_performance_summary()
+                logger.info(f"  总batch数: {summary.get('total_batches', 0)}")
+                logger.info(f"  OOM次数: {summary.get('oom_count', 0)}")
+                logger.info(f"  NaN损失次数: {summary.get('nan_loss_count', 0)}")
+                if 'avg_batch_time' in summary:
+                    logger.info(f"  平均batch时间: {summary['avg_batch_time']:.2f}s")
+            logger.info("="*60)
+            # 最终保存
+            self.save_checkpoint(epoch, False)
+            self.plot_training_curves()
+            # 🔥 最终报告
+            if self.training_monitor:
+                self.training_monitor.save_monitoring_report()
+                self.training_monitor.generate_performance_plots()
+            # 保存训练指标
+            metrics_path = str(self.config.output_dir) + "/training_metrics.json"
+            with open(metrics_path, 'w', encoding='utf-8') as f:
+                json.dump(self.metrics.to_dict(), f, indent=2, ensure_ascii=False)
+            self.writer.close()
+        # DDP结束
+        if self.world_size > 1:
+            dist.destroy_process_group()
 
 
 def run_small_scale_test():
@@ -1102,6 +1131,7 @@ def main():
     parser.add_argument("--no_mixed_precision", action="store_true", help="禁用混合精度训练")
     parser.add_argument("--no_data_parallel", action="store_true", help="禁用DataParallel多GPU训练")
     parser.add_argument("--gpu_ids", type=int, nargs='+', help="指定使用的GPU ID")
+    parser.add_argument('--local_rank', type=int, default=0, help='DDP local rank')
     
     # 🔥 增强功能参数
     parser.add_argument("--enhanced_preset", type=str, default=None,
@@ -1176,6 +1206,16 @@ def main():
     config.use_data_parallel = not args.no_data_parallel
     config.gpu_ids = args.gpu_ids
     
+    # DDP初始化
+    world_size = int(os.environ.get('WORLD_SIZE', '1'))
+    local_rank = int(os.environ.get('LOCAL_RANK', args.local_rank))
+    if world_size > 1:
+        dist.init_process_group(backend='nccl')
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f'cuda:{local_rank}')
+    else:
+        device = torch.device(config.device)
+    
     # 打印配置信息
     print("🎯 Diffold训练 - 增强版")
     print("="*50)
@@ -1206,10 +1246,13 @@ def main():
     print("="*50)
     
     # 创建训练器
-    trainer = DiffoldTrainer(config)
+    trainer = DiffoldTrainer(config, local_rank=local_rank, world_size=world_size)
     
     # 开始训练
     trainer.train(resume_from=args.resume)
+    # DDP结束
+    if world_size > 1:
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":
