@@ -423,7 +423,11 @@ class DiffoldTrainer:
     
     def train_one_epoch(self, epoch: int) -> float:
         """训练一个epoch"""
-        self.model.set_train_mode()
+        # 兼容DataParallel
+        if self.using_data_parallel:
+            self.model.module.set_train_mode()
+        else:
+            self.model.set_train_mode()
         
         total_loss = 0.0
         num_batches = 0
@@ -613,7 +617,11 @@ class DiffoldTrainer:
     
     def validate(self, epoch: int) -> float:
         """验证模型"""
-        self.model.set_eval_mode()
+        # 兼容DataParallel
+        if self.using_data_parallel:
+            self.model.module.set_eval_mode()
+        else:
+            self.model.set_eval_mode()
         
         total_loss = 0.0
         num_batches = 0
