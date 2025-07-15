@@ -258,6 +258,8 @@ class DiffoldTrainer:
             self.model = DDP(self.model.to(self.device), device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
             self.using_ddp = True
             self.num_gpus = world_size
+            if self.is_main_process:
+                logger.info(f"使用DDP，GPU数量: {self.num_gpus}")
         else:
             self.model = self.model.to(self.device)
             self.using_ddp = False
@@ -331,23 +333,6 @@ class DiffoldTrainer:
         """设置模型"""
         logger.info("初始化Diffold模型...")
         model = Diffold(self.config, rhofold_checkpoint_path=self.config.rhofold_checkpoint)
-        
-        # 多GPU设置
-        if self.config.use_data_parallel and torch.cuda.device_count() > 1:
-            if self.config.gpu_ids:
-                device_ids = self.config.gpu_ids
-            else:
-                device_ids = list(range(torch.cuda.device_count()))
-            
-            model = nn.DataParallel(model, device_ids=device_ids)
-            self.using_data_parallel = True
-            self.num_gpus = len(device_ids)
-            logger.info(f"使用DataParallel，GPU数量: {self.num_gpus}")
-        else:
-            self.using_data_parallel = False
-            self.num_gpus = 1
-        
-        model = model.to(self.device)
         logger.info("模型初始化完成")
         return model
     
