@@ -1,0 +1,38 @@
+# 多阶段构建优化版本
+FROM nvidia/cuda:12.6.0-runtime-ubuntu22.04 as base
+
+# 设置非交互模式
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=Asia/Tokyo
+
+# 安装系统依赖（单独一层，便于缓存）
+RUN apt-get update && \
+    apt-get install -y \
+        python3 python3-venv python3-pip python3-dev \
+        git curl wget \
+        libxrender1 libxtst6 libxi6 libxrandr2 libxss1 libgconf-2-4 \
+        libxcomposite1 libxcursor1 libxdamage1 libfontconfig1 libxfixes3 \
+        libasound2 libatk1.0-0 libcairo-gobject2 libgtk-3-0 libgdk-pixbuf2.0-0 \
+        build-essential && \
+    python3 -m pip install --upgrade pip && \
+    python3 -m pip install uv && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+
+# 先复制依赖文件（利用Docker缓存）
+COPY pyproject.toml setup.py ./
+COPY diffold/ ./diffold/
+COPY rhofold/ ./rhofold/
+
+# 安装Python依赖（单独一层）
+RUN python3 -m uv pip install . --system
+
+# 再复制其他必要文件
+COPY train.py inference.py config_example.yaml ./
+COPY pretrained/ ./pretrained/
+COPY database/ ./database/
+
+# 训练入口
+ENTRYPOINT ["python3", "train.py"]
+CMD [] 

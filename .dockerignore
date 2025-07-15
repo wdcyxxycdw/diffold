@@ -1,0 +1,33 @@
+# 排除大的数据文件和缓存
+processed_data/
+output/
+*.log
+*.png
+*.jpg
+*.jpeg
+View.png
+
+# 排除开发文件
+.git/
+.vscode/
+.pytest_cache/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+envs/
+.venv/
+.env
+
+# 如果预训练模型可以在运行时下载，也可以排除
+# pretrained/
+
+# 排除示例和文档（运行时不需要）
+example/
+# README.md  # 保留 README.md，可能被 pyproject.toml 引用
+# *.md       # 保留所有 .md 文件
+
+# 排除过滤结果
+filter_summary.txt
+mismatch_report.txt 
