@@ -10,7 +10,7 @@ import logging
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, cast
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
@@ -76,6 +76,9 @@ class TrainingConfig:
         # 设备配置
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.mixed_precision = True
+        # torch.compile 配置
+        self.use_torch_compile = False
+        self.torch_compile_mode = 'default'  # 可选: 'default', 'reduce-overhead', 'max-autotune'
         
         # 多GPU配置
         self.use_data_parallel = True
@@ -252,18 +255,29 @@ class DiffoldTrainer:
         
         # 初始化模型
         self.model = self.setup_model()
+        # 移动到设备
+        self.model = self.model.to(self.device)
+        # ⚡ 可选 torch.compile
+        if self.config.use_torch_compile:
+            try:
+                self.model = torch.compile(self.model, mode=self.config.torch_compile_mode)
+                if self.is_main_process:
+                    logger.info(f"⚡ 已启用 torch.compile (mode={self.config.torch_compile_mode})")
+            except Exception as e:
+                if self.is_main_process:
+                    logger.warning(f"torch.compile 启用失败: {e}")
         # 统计并打印可训练参数总数
         total_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
         if self.is_main_process:
             logger.info(f"可训练参数总数: {total_params}")
         if world_size > 1:
-            self.model = DDP(self.model.to(self.device), device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
+            self.model = DDP(self.model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
             self.using_ddp = True
             self.num_gpus = world_size
             if self.is_main_process:
                 logger.info(f"使用DDP，GPU数量: {self.num_gpus}")
         else:
-            self.model = self.model.to(self.device)
+            # 单卡已在上面 to(device)
             self.using_ddp = False
             self.num_gpus = 1
         
@@ -389,8 +403,8 @@ class DiffoldTrainer:
             self.config.enhanced_features['optimizer']['use_advanced_optimizer']):
             logger.info("🎯 使用高级优化器")
             
-            self.enhanced_optimizer = AdaptiveOptimizer(
-                model=self.model,
+            self.enhanced_optimizer = AdaptiveOptimizer(  # type: ignore[arg-type]
+                model=cast(nn.Module, self.model),
                 optimizer_name=self.config.enhanced_features['optimizer']['optimizer_name'],
                 learning_rate=self.config.learning_rate,
                 weight_decay=self.config.weight_decay,
@@ -1142,6 +1156,11 @@ def main():
                        help="禁用数据预取")
     parser.add_argument("--disable_advanced_optimizer", action="store_true",
                        help="禁用高级优化器")
+    # torch.compile 相关参数
+    parser.add_argument("--torch_compile", action="store_true", help="启用 torch.compile (PyTorch>=2.0)")
+    parser.add_argument("--compile_mode", type=str, default="default",
+                        choices=["default", "reduce-overhead", "max-autotune"],
+                        help="torch.compile 优化模式")
     parser.add_argument("--grad_accum", type=int, default=None,
                        help="梯度累积步数 (gradient_accumulation_steps)，默认根据预设或1")
     
@@ -1182,6 +1201,12 @@ def main():
     if args.grad_accum is not None:
         config.enhanced_features['optimizer']['gradient_accumulation_steps'] = max(1, args.grad_accum)
         logger.info(f"✅ 设置梯度累积步数为: {config.enhanced_features['optimizer']['gradient_accumulation_steps']}")
+
+    # torch.compile 设置
+    if args.torch_compile:
+        config.use_torch_compile = True
+        config.torch_compile_mode = args.compile_mode
+        logger.info(f"⚡ 计划启用 torch.compile (mode={config.torch_compile_mode})")
     
     # 更新基础配置
     config.data_dir = args.data_dir
