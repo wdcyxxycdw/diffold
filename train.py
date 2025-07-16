@@ -1142,6 +1142,8 @@ def main():
                        help="禁用数据预取")
     parser.add_argument("--disable_advanced_optimizer", action="store_true",
                        help="禁用高级优化器")
+    parser.add_argument("--grad_accum", type=int, default=None,
+                       help="梯度累积步数 (gradient_accumulation_steps)，默认根据预设或1")
     
     # 其他参数
     parser.add_argument("--resume", type=str, default=None, help="从检查点恢复训练")
@@ -1175,6 +1177,11 @@ def main():
             config.enhanced_features['dataloader']['enable_prefetch'] = False
         if args.disable_advanced_optimizer:
             config.enhanced_features['optimizer']['use_advanced_optimizer'] = False
+    
+    # 如果指定了梯度累积步数
+    if args.grad_accum is not None:
+        config.enhanced_features['optimizer']['gradient_accumulation_steps'] = max(1, args.grad_accum)
+        logger.info(f"✅ 设置梯度累积步数为: {config.enhanced_features['optimizer']['gradient_accumulation_steps']}")
     
     # 更新基础配置
     config.data_dir = args.data_dir
