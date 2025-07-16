@@ -460,7 +460,8 @@ class DiffoldTrainer:
             enumerate(self.train_loader),
             total=min(max_batches, len(self.train_loader)),
             desc=f"Epoch {epoch+1}/{self.config.num_epochs}",
-            leave=False
+            leave=False,
+            disable=not self.is_main_process
         )
         
         for batch_idx, batch in progress_bar:
@@ -491,11 +492,16 @@ class DiffoldTrainer:
                         )
                     
                     # 更新进度条
-                    progress_bar.set_postfix({
-                        'loss': f"{loss.item():.6f}",
-                        'avg_loss': f"{total_loss/num_batches:.6f}",
-                        'lr': f"{self.optimizer.param_groups[0]['lr']:.2e}"
-                    })
+                    postfix_dict = {
+                        'loss': loss.item(),
+                        'avg_loss': total_loss / (batch_idx + 1),
+                        'lr': self.optimizer.param_groups[0]['lr']
+                    }
+                    if self.device.type == 'cuda':
+                        memory_reserved_gb = torch.cuda.memory_reserved(self.device) / 1024**3
+                        postfix_dict['mem_gb'] = f"{memory_reserved_gb:.2f}"
+                    
+                    progress_bar.set_postfix(**postfix_dict)
                 else:
                     logger.warning(f"Batch {batch_idx}: 无效损失，跳过")
                     
@@ -655,7 +661,8 @@ class DiffoldTrainer:
                 enumerate(self.valid_loader),
                 total=min(max_batches, len(self.valid_loader)),
                 desc="验证",
-                leave=False
+                leave=False,
+                disable=not self.is_main_process
             )
             
             for batch_idx, batch in progress_bar:
@@ -711,7 +718,14 @@ class DiffoldTrainer:
                                     confidence_scores=result.get('confidence_logits')
                                 )
                             
-                            progress_bar.set_postfix({'val_loss': f"{loss.item():.6f}"})
+                            postfix_dict = {
+                                'val_loss': loss.item(),
+                                'avg_val_loss': total_loss / (batch_idx + 1)
+                            }
+                            if self.device.type == 'cuda':
+                                memory_reserved_gb = torch.cuda.memory_reserved(self.device) / 1024**3
+                                postfix_dict['mem_gb'] = f"{memory_reserved_gb:.2f}"
+                            progress_bar.set_postfix(**postfix_dict)
                 
                 except Exception as e:
                     logger.warning(f"验证 Batch {batch_idx} 失败: {e}")
