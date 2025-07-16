@@ -1,7 +1,8 @@
 from torch import nn
 import torch
 import os
-from typing import NamedTuple, List
+import logging
+from typing import NamedTuple
 import torch.nn.functional as F
 
 from alphafold3_pytorch import(
@@ -10,7 +11,6 @@ from alphafold3_pytorch import(
     DiffusionModule,
     RelativePositionEncoding,
     ConfidenceHead,
-    ConfidenceHeadLogits,
     DistogramHead,
     ComputeAlignmentError,
 )
@@ -19,17 +19,17 @@ from alphafold3_pytorch.alphafold3 import(
     masked_average,
     batch_repeat_interleave,
     distance_to_dgram,
-    IS_PROTEIN_INDEX,
     IS_RNA_INDEX,
     IS_DNA_INDEX,
-    IS_MOLECULE_TYPES,
-    ADDITIONAL_MOLECULE_FEATS
 )
 from alphafold3_pytorch.inputs import NUM_MOLECULE_IDS
 from diffold.input_processor import process_alphafold3_input, process_multiple_alphafold3_inputs
-from diffold.mask_validator import MaskValidator, validate_batch_for_edm
+from diffold.mask_validator import MaskValidator
 
 from rhofold.rhofold import RhoFold
+
+# 设置日志
+logger = logging.getLogger(__name__)
 
 # 损失分解类，仿照AlphaFold3的LossBreakdown
 class DiffoldLossBreakdown(NamedTuple):
@@ -97,15 +97,15 @@ class Diffold(nn.Module):
             rhofold_checkpoint_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'pretrained', 'model_20221010_params.pt')
         
         if os.path.exists(rhofold_checkpoint_path):
-            print(f"正在加载RhoFold预训练权重: {rhofold_checkpoint_path}")
+            logger.info(f"正在加载RhoFold预训练权重: {rhofold_checkpoint_path}")
             checkpoint = torch.load(rhofold_checkpoint_path, map_location='cpu')
             if 'model' in checkpoint:
                 self.rhofold.load_state_dict(checkpoint['model'])
             else:
                 self.rhofold.load_state_dict(checkpoint)
-            print("✓ RhoFold预训练权重加载成功")
+            logger.info("✓ RhoFold预训练权重加载成功")
         else:
-            print(f"⚠ 警告: 未找到预训练权重文件: {rhofold_checkpoint_path}")
+            logger.warning(f"⚠ 警告: 未找到预训练权重文件: {rhofold_checkpoint_path}")
         
         # 固定RhoFold模型参数，不参与训练
         for param in self.rhofold.parameters():
@@ -156,7 +156,7 @@ class Diffold(nn.Module):
             ),
             atom_encoder_depth=3,
             atom_encoder_heads=4,
-            token_transformer_depth=24,
+            token_transformer_depth=16,
             token_transformer_heads=16,
             atom_decoder_depth=3,
             atom_decoder_heads=4,
@@ -575,14 +575,14 @@ class Diffold(nn.Module):
                 pair_features = []
                 max_seq_len = tokens.shape[2]  # padding后的最大长度
                 
-                print(f"处理batch: {batch_num}个序列, 最大长度: {max_seq_len}")
+                logger.info(f"处理batch: {batch_num}个序列, 最大长度: {max_seq_len}")
                 
                 for i in range(batch_num):
                     if seq_lengths is not None:
                         current_seq_len = seq_lengths[i].item()
                     else:
                         current_seq_len = tokens.shape[2]  # 使用padding后的最大长度
-                    print(f"处理序列 {i+1}/{batch_num}, 真实长度: {current_seq_len}")
+                    logger.debug(f"处理序列 {i+1}/{batch_num}, 真实长度: {current_seq_len}")
                     
                     # 去掉padding，只保留真实序列部分
                     current_tokens = tokens[i:i+1, :, :current_seq_len]  # [1, MSA_depth, real_len]
@@ -592,11 +592,11 @@ class Diffold(nn.Module):
                     
                     # 处理当前序列
                     with torch.no_grad():
-                        print(f"RhoFold输入[{i}]: tokens {current_tokens.shape}, rna_fm_tokens {current_rna_fm_tokens.shape if current_rna_fm_tokens is not None else 'None'}")
+                        logger.debug(f"RhoFold输入[{i}]: tokens {current_tokens.shape}, rna_fm_tokens {current_rna_fm_tokens.shape if current_rna_fm_tokens is not None else 'None'}")
                         outputs, single, pair = self.rhofold(current_tokens, current_rna_fm_tokens, current_seq, **kwargs)
                         
                         # single: [1, real_len, 256], pair: [1, real_len, real_len, 128]
-                        print(f"RhoFold输出[{i}]: single {single.shape}, pair {pair.shape}")
+                        logger.debug(f"RhoFold输出[{i}]: single {single.shape}, pair {pair.shape}")
                         
                         # 将结果padding回原始大小以便后续batch处理
                         padded_single = torch.zeros(1, max_seq_len, single.shape[-1], device=tokens.device)
@@ -612,14 +612,14 @@ class Diffold(nn.Module):
                 single_fea = torch.cat(single_features, dim=0)  # [batch_num, max_seq_len, 256]
                 pair_fea = torch.cat(pair_features, dim=0)      # [batch_num, max_seq_len, max_seq_len, 128]
                 
-                print(f"合并后的特征: single {single_fea.shape}, pair {pair_fea.shape}")
+                logger.debug(f"合并后的特征: single {single_fea.shape}, pair {pair_fea.shape}")
                 
             else:
                 with torch.no_grad():
-                    print("RhoFold输入:", tokens.shape, rna_fm_tokens.shape if rna_fm_tokens is not None else 'None')
+                    logger.debug("RhoFold输入:", tokens.shape, rna_fm_tokens.shape if rna_fm_tokens is not None else 'None')
                     outputs, single_fea, pair_fea = self.rhofold(tokens, rna_fm_tokens, seq, **kwargs)
         except Exception as e:
-            print(f"⚠️ RhoFold前向传播失败: {e}")
+            logger.error(f"⚠️ RhoFold前向传播失败: {e}")
             import traceback
             traceback.print_exc()
             exit()
@@ -638,7 +638,7 @@ class Diffold(nn.Module):
         # 如果没有目标坐标且在训练模式，返回RhoFold的输出用于测试
         if target_coords is None:
             if self.training:
-                print("⚠️ 训练模式但没有目标坐标")
+                logger.warning("⚠️ 训练模式但没有目标坐标")
                 return None, None, None
         
         # 处理target_coords，将batch张量转换为列表格式
@@ -675,7 +675,7 @@ class Diffold(nn.Module):
                     }
                     input_list.append(input_dict)
                     
-                    print(f"序列[{i}]: {seq[i][:10] if seq is not None else 'None'}..., 序列长度: {current_seq_len}, 原子数: {current_coords.shape[0]}")
+                    logger.debug(f"序列[{i}]: {seq[i][:10] if seq is not None else 'None'}..., 序列长度: {current_seq_len}, 原子数: {current_coords.shape[0]}")
                 
                 # 使用process_multiple_alphafold3_inputs处理batch
                 result = process_multiple_alphafold3_inputs(
@@ -698,10 +698,10 @@ class Diffold(nn.Module):
                     atom_pos=atom_pos_list,
                 )
         else:
-            print("没有目标坐标")
+            logger.warning("没有目标坐标")
             exit()
 
-        print("AlphaFold3输入:",
+        logger.debug("AlphaFold3输入:",
             "atom_inputs", af_in.atom_inputs.shape if af_in.atom_inputs is not None else 'None',
             "atompair_inputs", af_in.atompair_inputs.shape if af_in.atompair_inputs is not None else 'None',
             "additional_token_feats", af_in.additional_token_feats.shape if af_in.additional_token_feats is not None else 'None',
@@ -768,14 +768,14 @@ class Diffold(nn.Module):
                     actual_len = seq_lengths[i].item()
                     seq_mask[i, :actual_len] = True
                 
-                print(f"生成序列mask: {seq_mask.shape}, 真实长度: {seq_lengths.tolist() if seq_lengths is not None else 'None'}")
+                logger.debug(f"生成序列mask: {seq_mask.shape}, 真实长度: {seq_lengths.tolist() if seq_lengths is not None else 'None'}")
                 
                 # 将seq_mask应用到single和pair特征上
                 single_fea = single_fea * seq_mask.unsqueeze(-1)  # [bs, seq_len, dim] * [bs, seq_len, 1]
                 pair_fea = pair_fea * seq_mask.unsqueeze(-1).unsqueeze(-2)  # 应用到行
                 pair_fea = pair_fea * seq_mask.unsqueeze(-2).unsqueeze(-1)  # 应用到列
         else:
-            print("没有提供molecule_atom_lens")
+            logger.error("没有提供molecule_atom_lens")
             exit()
 
         # 处理missing_atom_mask的维度对齐
@@ -788,7 +788,7 @@ class Diffold(nn.Module):
                     missing_atom_mask, 
                     torch.ones(batch_num, padded_atom_num - real_atom_num, device=device, dtype=missing_atom_mask.dtype)
                 ], dim=1)
-                print(f"扩展missing_atom_mask: {real_atom_num} -> {padded_atom_num}")
+                logger.debug(f"扩展missing_atom_mask: {real_atom_num} -> {padded_atom_num}")
 
         relative_position_encoding = self.relative_position_encoding(
             additional_molecule_feats = af_in.additional_molecule_feats,
@@ -799,7 +799,7 @@ class Diffold(nn.Module):
         
         if has_ground_truth:
             # 有ground truth：计算损失（无论training还是eval模式）
-            print(f"计算损失 - 模式: {'训练' if self.training else '验证'}")
+            logger.debug(f"计算损失 - 模式: {'训练' if self.training else '验证'}")
             
             # 🔍 验证batch数据一致性（在训练模式下）
             if self.training and hasattr(self, 'mask_validator') and missing_atom_mask is not None:
@@ -824,26 +824,26 @@ class Diffold(nn.Module):
                         
                         # 如果有严重问题，记录警告
                         if not batch_validation['is_valid'] or not edm_validation['is_valid']:
-                            print(f"⚠️ Mask验证发现问题:")
+                            logger.warning(f"⚠️ Mask验证发现问题:")
                             for error in batch_validation.get('errors', []) + edm_validation.get('errors', []):
-                                print(f"  - {error}")
+                                logger.warning(f"  - {error}")
                             
                             # 在严格模式下可能会抛出异常，这里只记录
                             if len(batch_validation.get('errors', [])) > 0:
-                                print(f"  batch验证错误数: {len(batch_validation['errors'])}")
+                                logger.warning(f"  batch验证错误数: {len(batch_validation['errors'])}")
                             if len(edm_validation.get('errors', [])) > 0:
-                                print(f"  EDM输入验证错误数: {len(edm_validation['errors'])}")
+                                logger.warning(f"  EDM输入验证错误数: {len(edm_validation['errors'])}")
                         
                         # 记录统计信息（可选）
                         if batch_validation.get('statistics'):
                             stats = batch_validation['statistics']
                             if 'seq_length_variance' in stats and stats['seq_length_variance'] > 0:
-                                print(f"  序列长度差异: {stats['seq_length_variance']}")
+                                logger.debug(f"  序列长度差异: {stats['seq_length_variance']}")
                             if 'avg_atom_coverage' in stats:
-                                print(f"  平均原子覆盖率: {stats['avg_atom_coverage']:.2%}")
+                                logger.debug(f"  平均原子覆盖率: {stats['avg_atom_coverage']:.2%}")
                 
                 except Exception as e:
-                    print(f"⚠️ Mask验证过程出错: {e}")
+                    logger.warning(f"⚠️ Mask验证过程出错: {e}")
                     # 验证失败不应该影响训练，继续执行
             
             diffusion_loss, denoised_atom_pos, diffusion_loss_breakdown, _ = self.edm(
@@ -891,7 +891,7 @@ class Diffold(nn.Module):
                 )
                 
             except Exception as e:
-                print(f"WARNING: 置信度损失计算失败: {e}")
+                logger.warning(f"WARNING: 置信度损失计算失败: {e}")
                 import traceback
                 traceback.print_exc()
                 
@@ -938,7 +938,7 @@ class Diffold(nn.Module):
             }
         else:
             # 没有ground truth：进行采样
-            print("进行采样生成")
+            logger.info("进行采样生成")
             
             sampled_coords = self.edm.sample(
                 atom_feats = atom_feats,

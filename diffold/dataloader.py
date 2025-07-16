@@ -963,7 +963,7 @@ def create_data_loaders(
 # 使用示例和测试函数
 def test_dataloader():
     """测试数据加载器功能"""
-    print("测试RNA3D数据加载器...")
+    logger.info("测试RNA3D数据加载器...")
     
     # 创建数据加载器
     data_loader = RNA3DDataLoader(
@@ -977,29 +977,29 @@ def test_dataloader():
     
     try:
         # 测试单个fold
-        print("=== 测试单个fold ===")
+        logger.info("=== 测试单个fold ===")
         train_loader = data_loader.get_train_dataloader(fold=0)
         valid_loader = data_loader.get_valid_dataloader(fold=0)
         
-        print(f"Fold 0 - 训练样本数: {len(train_loader.dataset)}")
-        print(f"Fold 0 - 验证样本数: {len(valid_loader.dataset)}")
+        logger.info(f"Fold 0 - 训练样本数: {len(train_loader.dataset)}")
+        logger.info(f"Fold 0 - 验证样本数: {len(valid_loader.dataset)}")
         
         # 测试一个batch
         for batch_idx, batch in enumerate(train_loader):
-            print(f"\nBatch {batch_idx + 1}:")
-            print(f"  - 样本名称: {batch['names']}")
-            print(f"  - 序列长度: {batch['seq_lengths'].tolist()}")
-            print(f"  - Tokens形状: {batch['tokens'].shape}")
+            logger.info(f"\nBatch {batch_idx + 1}:")
+            logger.info(f"  - 样本名称: {batch['names']}")
+            logger.info(f"  - 序列长度: {batch['seq_lengths'].tolist()}")
+            logger.info(f"  - Tokens形状: {batch['tokens'].shape}")
             if batch['rna_fm_tokens'] is not None:
-                print(f"  - rMSA Tokens形状: {batch['rna_fm_tokens'].shape}")
-            print(f"  - 坐标形状: {batch['coordinates'].shape}")
-            print(f"  - 坐标mask形状: {batch['coord_masks'].shape}")
+                logger.info(f"  - rMSA Tokens形状: {batch['rna_fm_tokens'].shape}")
+            logger.info(f"  - 坐标形状: {batch['coordinates'].shape}")
+            logger.info(f"  - 坐标mask形状: {batch['coord_masks'].shape}")
             
             # 只测试第一个batch
             break
         
         # 测试所有fold的统计信息
-        print("\n=== 测试所有fold统计信息 ===")
+        logger.info("\n=== 测试所有fold统计信息 ===")
         all_loaders = data_loader.get_all_folds_dataloaders()
         
         total_train = total_valid = 0
@@ -1008,14 +1008,12 @@ def test_dataloader():
             valid_size = len(loaders['valid'].dataset)
             total_train += train_size
             total_valid += valid_size
-        
-        print(f"\n总计: 训练样本 {total_train}, 验证样本 {total_valid}")
-        print(f"可用fold数: {len(all_loaders)}")
-        
-        print("\n✓ 数据加载器测试成功!")
+        logger.info(f"\n总计: 训练样本 {total_train}, 验证样本 {total_valid}")
+        logger.info(f"可用fold数: {len(all_loaders)}")
+        logger.info("\n✓ 数据加载器测试成功!")
         
     except Exception as e:
-        print(f"✗ 数据加载器测试失败: {e}")
+        logger.error(f"✗ 数据加载器测试失败: {e}")
         import traceback
         traceback.print_exc()
 

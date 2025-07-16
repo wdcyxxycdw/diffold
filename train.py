@@ -24,21 +24,19 @@ import os
 from diffold.diffold import Diffold
 from diffold.dataloader import create_data_loaders
 
-# 🔥 导入增强功能模块
-try:
-    from diffold.training_monitor import TrainingMonitor
-    from diffold.advanced_optimizers import AdaptiveOptimizer, DataLoaderOptimizer, EvaluationMetrics
-    from diffold.training_config_enhanced import get_recommended_config, create_config_from_preset
-    ENHANCED_FEATURES_AVAILABLE = True
-except ImportError as e:
-    print(f"⚠️ 增强功能不可用: {e}")
-    print("💡 安装依赖: pip install psutil matplotlib")
-    ENHANCED_FEATURES_AVAILABLE = False
-
 # 设置日志
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# 🔥 导入增强功能模块
+try:
+    from diffold.training_monitor import TrainingMonitor
+    from diffold.advanced_optimizers import AdaptiveOptimizer, DataLoaderOptimizer, EvaluationMetrics
+    ENHANCED_FEATURES_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"⚠️ 增强功能不可用: {e}")
+    logger.info("💡 安装依赖: pip install psutil matplotlib")
+    ENHANCED_FEATURES_AVAILABLE = False
 
 class TrainingConfig:
     """训练配置类 - 兼容原版和增强版"""
@@ -254,6 +252,10 @@ class DiffoldTrainer:
         
         # 初始化模型
         self.model = self.setup_model()
+        # 统计并打印可训练参数总数
+        total_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        if self.is_main_process:
+            logger.info(f"可训练参数总数: {total_params}")
         if world_size > 1:
             self.model = DDP(self.model.to(self.device), device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
             self.using_ddp = True
@@ -1041,7 +1043,7 @@ class DiffoldTrainer:
 
 def run_small_scale_test():
     """运行小规模测试"""
-    print("🧪 运行小规模测试...")
+    logger.info("🧪 运行小规模测试...")
     
     # 测试配置
     config = TrainingConfig()
@@ -1068,13 +1070,13 @@ def run_small_scale_test():
         # 运行训练
         trainer.train()
         
-        print("✅ 小规模测试完成!")
-        print(f"📁 输出目录: {config.output_dir}")
-        print(f"📁 检查点目录: {config.checkpoint_dir}")
+        logger.info("✅ 小规模测试完成!")
+        logger.info(f"📁 输出目录: {config.output_dir}")
+        logger.info(f"📁 检查点目录: {config.checkpoint_dir}")
         
         exit()
     except Exception as e:
-        print(f"❌ 小规模测试失败: {e}")
+        logger.error(f"❌ 小规模测试失败: {e}")
         import traceback
         traceback.print_exc()
 
@@ -1145,12 +1147,12 @@ def main():
     if args.disable_enhanced or not ENHANCED_FEATURES_AVAILABLE:
         config.enhanced_features['enable_enhanced_training'] = False
         if args.disable_enhanced:
-            print("⚠️ 增强功能已手动禁用")
+            logger.warning("⚠️ 增强功能已手动禁用")
     else:
         # 应用预设
         if args.enhanced_preset:
             config.apply_enhanced_preset(args.enhanced_preset)
-            print(f"🔥 应用增强预设: {args.enhanced_preset}")
+            logger.info(f"🔥 应用增强预设: {args.enhanced_preset}")
         
         # 应用具体禁用选项
         if args.disable_monitoring:
@@ -1198,18 +1200,18 @@ def main():
         device = torch.device(config.device)
     
     # 打印配置信息
-    print("🎯 Diffold训练 - 增强版")
-    print("="*50)
-    print(f"📁 数据目录: {config.data_dir}")
-    print(f"📦 批次大小: {config.batch_size}")
-    print(f"📏 最大序列长度: {config.max_sequence_length}")
-    print(f"🖥️  设备: {config.device}")
-    print(f"⏱️  训练轮数: {config.num_epochs}")
-    print(f"📊 学习率: {config.learning_rate}")
+    logger.info("🎯 Diffold训练 - 增强版")
+    logger.info("="*50)
+    logger.info(f"📁 数据目录: {config.data_dir}")
+    logger.info(f"📦 批次大小: {config.batch_size}")
+    logger.info(f"📏 最大序列长度: {config.max_sequence_length}")
+    logger.info(f"🖥️  设备: {config.device}")
+    logger.info(f"⏱️  训练轮数: {config.num_epochs}")
+    logger.info(f"📊 学习率: {config.learning_rate}")
     
     # 🔥 显示增强功能状态
     if config.enhanced_features.get('enable_enhanced_training', False):
-        print("🔥 增强功能: 已启用")
+        logger.info("🔥 增强功能: 已启用")
         enabled_features = []
         if config.enhanced_features['monitoring']['enable_performance_monitoring']:
             enabled_features.append("性能监控")
@@ -1220,11 +1222,11 @@ def main():
         if config.enhanced_features['evaluation']['compute_structure_metrics']:
             enabled_features.append("结构评估")
         if enabled_features:
-            print(f"   • {', '.join(enabled_features)}")
+            logger.info(f"   • {', '.join(enabled_features)}")
     else:
-        print("⚪ 增强功能: 已禁用（使用原版功能）")
+        logger.info("⚪ 增强功能: 已禁用（使用原版功能）")
     
-    print("="*50)
+    logger.info("="*50)
     
     # 创建训练器
     trainer = DiffoldTrainer(config, local_rank=local_rank, world_size=world_size)

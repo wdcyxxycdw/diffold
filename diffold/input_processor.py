@@ -1,11 +1,15 @@
 import torch
 from typing import List, Optional, Tuple, Union
 from copy import deepcopy
+import logging
 from alphafold3_pytorch.inputs import (
     Alphafold3Input, 
     alphafold3_inputs_to_batched_atom_input,
     BatchedAtomInput
 )
+
+# 设置日志
+logger = logging.getLogger(__name__)
 
 # 添加lens_to_mask函数的导入或实现
 def lens_to_mask(lens: torch.Tensor, max_len: Optional[int] = None) -> torch.Tensor:
@@ -96,7 +100,7 @@ def process_alphafold3_input(
     atom_seq_len = batched_input.atom_inputs.shape[1]
     
     # 【关键修复】稳健的atom_pos维度处理
-    print(f"原始 atom_pos 维度: {batched_input.atom_pos.shape if batched_input.atom_pos is not None else 'None'}")
+    logger.debug(f"原始 atom_pos 维度: {batched_input.atom_pos.shape if batched_input.atom_pos is not None else 'None'}")
     
     # 检查atom_pos是否存在
     if batched_input.atom_pos is None:
@@ -118,7 +122,7 @@ def process_alphafold3_input(
     elif batched_input.atom_pos.dim() != 3:
         raise ValueError(f"不支持的atom_pos维度: {batched_input.atom_pos.shape}")
     
-    print(f"处理后 atom_pos 维度: {batched_input.atom_pos.shape}")
+    logger.debug(f"处理后 atom_pos 维度: {batched_input.atom_pos.shape}")
     
     # 获取处理后的维度信息
     atom_num_in_coords = batched_input.atom_pos.shape[1]
@@ -127,12 +131,12 @@ def process_alphafold3_input(
     # 生成atom_mask，使用atom_pos的实际原子数量
     atom_mask = lens_to_mask(total_atoms, max_len=atom_num_in_coords)
 
-    print("atom_pos:", batched_input.atom_pos.shape)
-    print("atom_mask:", atom_mask.shape)
+    logger.debug(f"atom_pos: {batched_input.atom_pos.shape}")
+    logger.debug(f"atom_mask: {atom_mask.shape}")
     
     # 如果atom_inputs的原子数量大于atom_pos的原子数量，需要填充
     if atom_seq_len > atom_num_in_coords:
-        print(f"填充 atom_pos: {atom_num_in_coords} -> {atom_seq_len}")
+        logger.debug(f"填充 atom_pos: {atom_num_in_coords} -> {atom_seq_len}")
         padding_atoms = atom_seq_len - atom_num_in_coords
         batched_input.atom_pos = torch.cat([
             batched_input.atom_pos, 
@@ -208,7 +212,7 @@ def process_multiple_alphafold3_inputs(
     atom_seq_len = batched_input.atom_inputs.shape[1]
     
     # 【添加原子数量对齐处理】与process_alphafold3_input保持一致
-    print(f"Multiple inputs - 原始 atom_pos 维度: {batched_input.atom_pos.shape if batched_input.atom_pos is not None else 'None'}")
+    logger.debug(f"Multiple inputs - 原始 atom_pos 维度: {batched_input.atom_pos.shape if batched_input.atom_pos is not None else 'None'}")
     
     if batched_input.atom_pos is not None:
         # 确保atom_pos存在的断言，帮助类型检查
@@ -230,7 +234,7 @@ def process_multiple_alphafold3_inputs(
         elif batched_input.atom_pos.dim() != 3:
             raise ValueError(f"不支持的atom_pos维度: {batched_input.atom_pos.shape}")
         
-        print(f"Multiple inputs - 处理后 atom_pos 维度: {batched_input.atom_pos.shape}")
+        logger.debug(f"Multiple inputs - 处理后 atom_pos 维度: {batched_input.atom_pos.shape}")
         
         # 获取处理后的维度信息
         atom_num_in_coords = batched_input.atom_pos.shape[1]
@@ -239,12 +243,12 @@ def process_multiple_alphafold3_inputs(
         # 生成atom_mask，使用atom_pos的实际原子数量
         atom_mask = lens_to_mask(total_atoms, max_len=atom_num_in_coords)
 
-        print(f"Multiple inputs - atom_pos: {batched_input.atom_pos.shape}")
-        print(f"Multiple inputs - atom_mask: {atom_mask.shape}")
+        logger.debug(f"Multiple inputs - atom_pos: {batched_input.atom_pos.shape}")
+        logger.debug(f"Multiple inputs - atom_mask: {atom_mask.shape}")
         
         # 如果atom_inputs的原子数量大于atom_pos的原子数量，需要填充
         if atom_seq_len > atom_num_in_coords:
-            print(f"Multiple inputs - 填充 atom_pos: {atom_num_in_coords} -> {atom_seq_len}")
+            logger.debug(f"Multiple inputs - 填充 atom_pos: {atom_num_in_coords} -> {atom_seq_len}")
             padding_atoms = atom_seq_len - atom_num_in_coords
             
             # 确保batched_input.atom_pos不为None
@@ -300,29 +304,29 @@ def print_input_summary(batched_input: BatchedAtomInput, atom_mask: Optional[tor
         batched_input: BatchedAtomInput对象
         atom_mask: 可选的atom_mask张量
     """
-    print("=== AlphaFold3 Input Summary ===")
+    logger.info("=== AlphaFold3 Input Summary ===")
     shapes = get_input_shapes(batched_input)
     
     # 主要维度信息
     if 'atom_inputs' in shapes and isinstance(batched_input.atom_inputs, torch.Tensor):
         batch_size, num_atoms, atom_dim = batched_input.atom_inputs.shape
-        print(f"Batch size: {batch_size}")
-        print(f"Total atoms: {num_atoms}")
-        print(f"Atom feature dim: {atom_dim}")
+        logger.info(f"Batch size: {batch_size}")
+        logger.info(f"Total atoms: {num_atoms}")
+        logger.info(f"Atom feature dim: {atom_dim}")
     
     if 'molecule_atom_lens' in shapes and isinstance(batched_input.molecule_atom_lens, torch.Tensor):
         batch_size, num_tokens = batched_input.molecule_atom_lens.shape
-        print(f"Number of tokens: {num_tokens}")
+        logger.info(f"Number of tokens: {num_tokens}")
     
     # 如果提供了atom_mask，显示其信息
     if atom_mask is not None:
-        print(f"Atom mask shape: {list(atom_mask.shape)}")
+        logger.info(f"Atom mask shape: {list(atom_mask.shape)}")
         total_valid_atoms = atom_mask.sum(dim=-1)
-        print(f"Valid atoms per batch: {total_valid_atoms.tolist()}")
+        logger.info(f"Valid atoms per batch: {total_valid_atoms.tolist()}")
     
-    print("\n=== Field Shapes ===")
+    logger.info("\n=== Field Shapes ===")
     for key, shape in shapes.items():
-        print(f"{key}: {shape}")
+        logger.info(f"{key}: {shape}")
 
 
 
