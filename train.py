@@ -552,7 +552,7 @@ class DiffoldTrainer:
         
         # 前向传播
         if self.scaler is not None:
-            with torch.cuda.amp.autocast():
+            with torch.autocast('cuda', dtype=torch.bfloat16):
                 result = self.model(
                     tokens=tokens,
                     rna_fm_tokens=rna_fm_tokens,
