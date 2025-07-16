@@ -11,3 +11,5 @@ data*
 filter_summary.txt
 mismatch_report.txt
 *.log
+checkpoints/
+output/
