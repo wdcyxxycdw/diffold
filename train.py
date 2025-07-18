@@ -57,7 +57,7 @@ class TrainingConfig:
         self.learning_rate = 1e-4
         self.weight_decay = 1e-5
         self.grad_clip_norm = 1.0
-        self.warmup_epochs = 5
+        self.warmup_epochs = 3  # 修复: 减少预热轮数，针对100轮优化
         
         # 调度器配置
         self.scheduler_type = "cosine"  # "cosine", "plateau", "warmup_cosine"
@@ -421,6 +421,13 @@ class DiffoldTrainer:
             # 包装原接口
             self.optimizer = self.enhanced_optimizer.optimizer
             self.scheduler = self.enhanced_optimizer.scheduler
+            
+            # 检查是否需要使用plateau调度器（来自学习率修复）
+            if hasattr(self, 'checkpoint_data') and self.checkpoint_data.get('use_plateau_scheduler', False):
+                logger.info("🔄 检测到学习率修复标记，切换到plateau调度器")
+                self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                    self.optimizer, mode='min', factor=0.8, patience=5, verbose=True
+                )
             
         else:
             # 使用原版优化器
@@ -807,7 +814,8 @@ class DiffoldTrainer:
             return 0
         
         logger.info(f"加载检查点: {checkpoint_path}")
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+                    checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+            self.checkpoint_data = checkpoint  # 保存检查点数据供调度器使用
         
         # 加载模型状态（处理DataParallel）
         model_state_dict = checkpoint['model_state_dict']
@@ -1109,6 +1117,43 @@ def run_small_scale_test():
         traceback.print_exc()
 
 
+def fix_checkpoint_learning_rate(checkpoint_path, new_lr):
+    """修复检查点中的学习率 - 针对预热bug的快速修复"""
+    import shutil
+    
+    if not os.path.exists(checkpoint_path):
+        logger.error(f"检查点不存在: {checkpoint_path}")
+        return False
+    
+    # 备份
+    backup_path = f"{checkpoint_path}.backup"
+    if not os.path.exists(backup_path):
+        shutil.copy2(checkpoint_path, backup_path)
+        logger.info(f"已备份检查点至: {backup_path}")
+    
+    # 修复学习率 - 兼容PyTorch 2.6的安全机制
+    checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+    
+    if 'optimizer_state_dict' in checkpoint:
+        optimizer_state = checkpoint['optimizer_state_dict']
+        if 'param_groups' in optimizer_state:
+            for group in optimizer_state['param_groups']:
+                old_lr = group['lr']
+                group['lr'] = new_lr
+                logger.info(f"🔧 修复学习率: {old_lr:.2e} → {new_lr:.2e}")
+    
+    # 重置调度器状态，使用plateau调度器避免继续下降
+    if 'scheduler_state_dict' in checkpoint:
+        logger.info("🔄 重置调度器状态，改用plateau调度器")
+        del checkpoint['scheduler_state_dict']
+        # 添加配置信息，让恢复时使用plateau调度器
+        checkpoint['use_plateau_scheduler'] = True
+    
+    torch.save(checkpoint, checkpoint_path)
+    logger.info(f"✅ 学习率修复完成: {checkpoint_path}")
+    return True
+
+
 def main():
     """主函数"""
     parser = argparse.ArgumentParser(description="Diffold模型训练 - 增强版")
@@ -1168,12 +1213,39 @@ def main():
     parser.add_argument("--resume", type=str, default=None, help="从检查点恢复训练")
     parser.add_argument("--test", action="store_true", help="运行小规模测试")
     
+    # 🔧 学习率修复参数
+    parser.add_argument("--fix_lr", type=float, default=None, 
+                       help="修复检查点中的学习率 (配合--resume使用)")
+    parser.add_argument("--fix_lr_only", action="store_true",
+                       help="仅修复学习率，不开始训练")
+    
     args = parser.parse_args()
     
     # 如果是测试模式
     if args.test:
         run_small_scale_test()
         return
+    
+    # 🔧 处理学习率修复
+    if args.fix_lr is not None:
+        if args.resume is None:
+            logger.error("❌ 使用 --fix_lr 需要指定 --resume 检查点路径")
+            return
+        
+        logger.info(f"🔧 开始修复学习率: {args.fix_lr}")
+        success = fix_checkpoint_learning_rate(args.resume, args.fix_lr)
+        
+        if success:
+            logger.info("✅ 学习率修复完成!")
+            if args.fix_lr_only:
+                logger.info("💡 使用以下命令恢复训练:")
+                logger.info(f"python train.py --resume {args.resume}")
+                return
+            else:
+                logger.info("🚀 继续开始训练...")
+        else:
+            logger.error("❌ 学习率修复失败")
+            return
     
     # 创建配置
     config = TrainingConfig()

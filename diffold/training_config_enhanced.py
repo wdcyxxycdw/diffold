@@ -38,19 +38,19 @@ class EnhancedTrainingConfig:
             'max_grad_norm': 1.0
         }
         
-        # 🔥 新增：增强的学习率调度器配置
+        # 🔥 新增：增强的学习率调度器配置 - 针对100轮优化
         self.scheduler_config = {
             'type': 'warmup_cosine',  # 'warmup_cosine', 'warmup_cosine_restarts', 'plateau', 'cosine'
-            'warmup_epochs': 5,
+            'warmup_epochs': 3,  # 修复: 减少预热轮数
             'warmup_start_lr': 1e-7,
             'T_max': 100,
             'eta_min': 1e-6,
-            # 余弦重启参数
-            'T_0': 50,
-            'T_mult': 2,
+            # 余弦重启参数 - 针对100轮优化
+            'T_0': 25,  # 第一个周期25轮
+            'T_mult': 2,  # 25→50→100
             # plateau参数
             'factor': 0.5,
-            'patience': 10
+            'patience': 8  # 减少patience，更快响应
         }
         
         # 保存配置
@@ -321,7 +321,7 @@ PRESET_CONFIGS = {
         "batch_size": 8,
         "max_sequence_length": 128,
         "learning_rate": 2e-4,
-        "scheduler_config": {"type": "warmup_cosine", "warmup_epochs": 3}
+        "scheduler_config": {"type": "warmup_cosine", "warmup_epochs": 2}  # 修复: 更短预热
     },
     
     "large_model": {
@@ -329,7 +329,7 @@ PRESET_CONFIGS = {
         "max_sequence_length": 512,
         "learning_rate": 5e-5,
         "optimizer_config": {"gradient_accumulation_steps": 4},
-        "scheduler_config": {"type": "warmup_cosine_restarts", "T_0": 30}
+        "scheduler_config": {"type": "warmup_cosine_restarts", "T_0": 25, "warmup_epochs": 3}  # 修复: 优化参数
     },
     
     "production": {

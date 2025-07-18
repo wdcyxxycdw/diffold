@@ -49,7 +49,7 @@ def main(config):
         raise e
         
     logger.info(f'    loading {config.ckpt}')
-    model.load_state_dict(torch.load(config.ckpt, map_location=torch.device('cpu'))['model'])
+    model.load_state_dict(torch.load(config.ckpt, map_location=torch.device('cpu'), weights_only=False)['model'])
     model.eval()
 
     # Input seq, MSA

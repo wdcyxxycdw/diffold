@@ -55,8 +55,9 @@ class WarmupLRScheduler(_LRScheduler):
     
     def get_lr(self):
         if self.last_epoch < self.warmup_epochs:
-            # 预热阶段：线性增长
-            return [self.warmup_start_lr + (base_lr - self.warmup_start_lr) * self.last_epoch / self.warmup_epochs
+            # 预热阶段：线性增长 - 修复: 使用 (last_epoch + 1) 确保达到目标学习率
+            progress = (self.last_epoch + 1) / self.warmup_epochs
+            return [self.warmup_start_lr + (base_lr - self.warmup_start_lr) * progress
                     for base_lr in self.base_lrs]
         else:
             # 预热结束后使用基础调度器
@@ -110,8 +111,9 @@ class CosineAnnealingWarmRestarts(_LRScheduler):
     
     def get_lr(self):
         if self.T_cur < self.warmup_epochs:
-            # 预热阶段
-            return [self.warmup_start_lr + (base_lr - self.warmup_start_lr) * self.T_cur / self.warmup_epochs
+            # 预热阶段 - 修复: 使用 (T_cur + 1) 确保达到目标学习率
+            progress = (self.T_cur + 1) / self.warmup_epochs
+            return [self.warmup_start_lr + (base_lr - self.warmup_start_lr) * progress
                     for base_lr in self.base_lrs]
         else:
             # 余弦退火阶段

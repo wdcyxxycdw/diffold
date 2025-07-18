@@ -98,7 +98,7 @@ class Diffold(nn.Module):
         
         if os.path.exists(rhofold_checkpoint_path):
             logger.info(f"正在加载RhoFold预训练权重: {rhofold_checkpoint_path}")
-            checkpoint = torch.load(rhofold_checkpoint_path, map_location='cpu')
+            checkpoint = torch.load(rhofold_checkpoint_path, map_location='cpu', weights_only=False)
             if 'model' in checkpoint:
                 self.rhofold.load_state_dict(checkpoint['model'])
             else:
