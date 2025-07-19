@@ -44,7 +44,7 @@ class TrainingConfig:
     def __init__(self):
         # 基础数据配置
         self.data_dir = "./processed_data"
-        self.batch_size = 4
+        self.batch_size = 8
         self.max_sequence_length = 256
         self.num_workers = 4
         self.use_msa = True
@@ -54,7 +54,7 @@ class TrainingConfig:
         
         # 训练配置
         self.num_epochs = 100
-        self.learning_rate = 1e-4
+        self.learning_rate = 1.2e-4
         self.weight_decay = 1e-5
         self.grad_clip_norm = 1.0
         self.warmup_epochs = 3  # 修复: 减少预热轮数，针对100轮优化
@@ -66,7 +66,8 @@ class TrainingConfig:
         # 保存配置
         self.output_dir = "./output"
         self.checkpoint_dir = "./checkpoints"
-        self.save_every = 5
+        self.save_every = 1  # 检查点保存频率
+        self.plot_every = 1  # 训练曲线保存频率
         self.keep_last_n_checkpoints = 5
         
         # 验证配置
@@ -101,7 +102,7 @@ class TrainingConfig:
                 'enable_performance_monitoring': True,
                 'enable_memory_monitoring': True,
                 'enable_health_checking': True,
-                'monitoring_interval': 10,
+                'monitoring_interval': 1,
                 'save_monitoring_plots': True,
                 'memory_cleanup_threshold': 0.85
             },
@@ -422,13 +423,6 @@ class DiffoldTrainer:
             self.optimizer = self.enhanced_optimizer.optimizer
             self.scheduler = self.enhanced_optimizer.scheduler
             
-            # 检查是否需要使用plateau调度器（来自学习率修复）
-            if hasattr(self, 'checkpoint_data') and self.checkpoint_data.get('use_plateau_scheduler', False):
-                logger.info("🔄 检测到学习率修复标记，切换到plateau调度器")
-                self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                    self.optimizer, mode='min', factor=0.8, patience=5, verbose=True
-                )
-            
         else:
             # 使用原版优化器
             if hasattr(self.model, 'get_trainable_parameters'):
@@ -480,9 +474,11 @@ class DiffoldTrainer:
         progress_bar = tqdm(
             enumerate(self.train_loader),
             total=min(max_batches, len(self.train_loader)),
-            desc=f"Epoch {epoch+1}/{self.config.num_epochs}",
+            desc=f"🚀 训练 {epoch+1}/{self.config.num_epochs}",
             leave=False,
-            disable=not self.is_main_process
+            disable=not self.is_main_process,
+            ncols=120,
+            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]"
         )
         
         for batch_idx, batch in progress_bar:
@@ -512,15 +508,15 @@ class DiffoldTrainer:
                             model=self.model
                         )
                     
-                    # 更新进度条
+                    # 美化进度条显示
                     postfix_dict = {
-                        'loss': loss.item(),
-                        'avg_loss': total_loss / (batch_idx + 1),
-                        'lr': self.optimizer.param_groups[0]['lr']
+                        '损失': f'{loss.item():.3f}',
+                        '平均': f'{total_loss / (batch_idx + 1):.3f}',
+                        '学习率': f'{self.optimizer.param_groups[0]["lr"]:.2e}'
                     }
                     if self.device.type == 'cuda':
                         memory_reserved_gb = torch.cuda.memory_reserved(self.device) / 1024**3
-                        postfix_dict['mem_gb'] = f"{memory_reserved_gb:.2f}"
+                        postfix_dict['显存'] = f"{memory_reserved_gb:.1f}GB"
                     
                     progress_bar.set_postfix(**postfix_dict)
                 else:
@@ -681,9 +677,11 @@ class DiffoldTrainer:
             progress_bar = tqdm(
                 enumerate(self.valid_loader),
                 total=min(max_batches, len(self.valid_loader)),
-                desc="验证",
+                desc="🔍 验证中",
                 leave=False,
-                disable=not self.is_main_process
+                disable=not self.is_main_process,
+                ncols=120,
+                bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]"
             )
             
             for batch_idx, batch in progress_bar:
@@ -739,13 +737,14 @@ class DiffoldTrainer:
                                     confidence_scores=result.get('confidence_logits')
                                 )
                             
+                            # 美化验证进度条显示
                             postfix_dict = {
-                                'val_loss': loss.item(),
-                                'avg_val_loss': total_loss / (batch_idx + 1)
+                                '验证损失': f'{loss.item():.3f}',
+                                '平均': f'{total_loss / (batch_idx + 1):.3f}'
                             }
                             if self.device.type == 'cuda':
                                 memory_reserved_gb = torch.cuda.memory_reserved(self.device) / 1024**3
-                                postfix_dict['mem_gb'] = f"{memory_reserved_gb:.2f}"
+                                postfix_dict['显存'] = f"{memory_reserved_gb:.1f}GB"
                             progress_bar.set_postfix(**postfix_dict)
                 
                 except Exception as e:
@@ -814,8 +813,8 @@ class DiffoldTrainer:
             return 0
         
         logger.info(f"加载检查点: {checkpoint_path}")
-                    checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
-            self.checkpoint_data = checkpoint  # 保存检查点数据供调度器使用
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+        self.checkpoint_data = checkpoint  # 保存检查点数据供调度器使用
         
         # 加载模型状态（处理DataParallel）
         model_state_dict = checkpoint['model_state_dict']
@@ -902,17 +901,25 @@ class DiffoldTrainer:
     def train(self, resume_from: Optional[str] = None):
         """主训练循环"""
         if self.is_main_process:
-            logger.info("开始训练...")
+            logger.info("🚀 开始训练...")
+            logger.info("=" * 60)
         
-        # 🔥 打印增强功能状态
-        if self.enhanced_enabled:
-            if self.is_main_process:
-                logger.info("🔥 增强功能已启用:")
-                for category, features in self.config.enhanced_features.items():
-                    if isinstance(features, dict):
-                        enabled_features = [k for k, v in features.items() if v]
-                        if enabled_features:
-                            logger.info(f"  {category}: {', '.join(enabled_features)}")
+        # 🔥 美化增强功能状态显示
+        if self.enhanced_enabled and self.is_main_process:
+            logger.info("🔥 增强功能状态:")
+            feature_icons = {
+                'monitoring': '📊',
+                'optimizer': '🎯', 
+                'dataloader': '⚡',
+                'evaluation': '📏',
+                'error_recovery': '🛡️'
+            }
+            for category, features in self.config.enhanced_features.items():
+                if isinstance(features, dict) and category != 'enable_enhanced_training':
+                    enabled_features = [k for k, v in features.items() if v and k != 'enable_enhanced_training']
+                    if enabled_features:
+                        icon = feature_icons.get(category, '🔧')
+                        logger.info(f"   {icon} {category}: {len(enabled_features)} 项功能已启用")
         
         # 加载检查点（如果指定）
         start_epoch = 0
@@ -1001,29 +1008,34 @@ class DiffoldTrainer:
             def format_datetime(timestamp):
                 return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
             
-            # 打印进度
+            # 美化Epoch结果输出
             if self.is_main_process:
-                log_msg = f"Epoch {epoch+1}/{num_epochs} - "
-                log_msg += f"训练损失: {train_loss:.6f}, "
+                # 构建状态图标
+                progress_percent = (epoch + 1) / num_epochs * 100
+                status_icon = "⭐" if is_best else "📈" if valid_loss and train_loss > valid_loss else "🚀"
+                
+                # 主要信息行
+                log_msg = f"🎯 Epoch {epoch+1:3d}/{num_epochs} [{progress_percent:5.1f}%] "
+                log_msg += f"| 训练: {train_loss:.4f}"
                 if valid_loss is not None:
-                    log_msg += f"验证损失: {valid_loss:.6f}, "
-                log_msg += f"学习率: {current_lr:.2e}, "
-                log_msg += f"时间: {epoch_time:.1f}s"
+                    log_msg += f" | 验证: {valid_loss:.4f}"
+                log_msg += f" | LR: {current_lr:.2e} | {epoch_time:.0f}s {status_icon}"
                 if is_best:
-                    log_msg += " ⭐ 最佳模型!"
+                    log_msg += " 🏆 NEW BEST"
+                
                 logger.info(log_msg)
-                # 显示时间统计信息
-                time_msg = f"⏱️  已用时间: {format_time(elapsed_time)}, "
-                time_msg += f"预计剩余: {format_time(estimated_remaining_time)}, "
-                time_msg += f"预计完成: {format_datetime(estimated_completion_time)}"
-                logger.info(time_msg)
+                
+                # 时间统计行（简化显示）
+                if (epoch + 1) % 5 == 0 or is_best:  # 每5轮或最佳模型时显示详细时间
+                    time_msg = f"⏰ 已训练: {format_time(elapsed_time)} | 预计剩余: {format_time(estimated_remaining_time)} | 完成时间: {format_datetime(estimated_completion_time)}"
+                    logger.info(time_msg)
             
             # 保存检查点
             if self.is_main_process:
                 if (epoch + 1) % self.config.save_every == 0:
                     self.save_checkpoint(epoch, is_best)
                 # 绘制训练曲线
-                if (epoch + 1) % (self.config.save_every * 2) == 0:
+                if (epoch + 1) % self.config.plot_every == 0:
                     self.plot_training_curves()
                 # 🔥 保存监控报告
                 if (self.training_monitor and 
@@ -1077,82 +1089,124 @@ class DiffoldTrainer:
             dist.destroy_process_group()
 
 
-def run_small_scale_test():
-    """运行小规模测试"""
-    logger.info("🧪 运行小规模测试...")
+def run_small_scale_test(gpu_limit=None):
+    """运行小规模测试 - 包含多GPU环境测试"""
+    logger.info("🧪 启动多GPU环境小规模测试...")
     
-    # 测试配置
+    # 基础测试配置
     config = TrainingConfig()
     config.test_mode = True
-    config.test_epochs = 1
-    config.test_samples = 6
-    config.batch_size = 2
+    config.test_epochs = 4  # 测试2轮，验证完整流程
+    config.test_samples = 4   # 稍微增加样本数测试批次处理
     config.max_sequence_length = 128
-    config.device = "cuda"
-    config.num_workers = 0
+    config.num_workers = 2   # 测试数据加载
     config.output_dir = "./test_output"
     config.checkpoint_dir = "./test_checkpoints"
-    config.mixed_precision = False
-    config.use_data_parallel = False
+    
+    # 🔍 GPU环境检测和配置
+    gpu_count = torch.cuda.device_count()
+    
+    # 应用GPU限制
+    if gpu_limit is not None and gpu_limit > 0:
+        gpu_count = min(gpu_count, gpu_limit)
+        if gpu_limit < torch.cuda.device_count():
+            import os
+            os.environ['CUDA_VISIBLE_DEVICES'] = ','.join(str(i) for i in range(gpu_limit))
+            logger.info(f"🎯 限制使用 {gpu_limit} 个GPU")
+    
+    logger.info(f"🖥️  将使用 {gpu_count} 个GPU进行测试")
+    
+    if gpu_count == 0:
+        logger.warning("⚠️  未检测到GPU，使用CPU模式")
+        config.device = "cpu"
+        config.batch_size = 1
+        config.mixed_precision = False
+        config.use_data_parallel = False
+    elif gpu_count == 1:
+        logger.info("📱 单GPU模式测试")
+        config.device = "cuda"
+        config.batch_size = 2
+        config.mixed_precision = True
+        config.use_data_parallel = False
+    else:
+        logger.info(f"🚀 多GPU模式测试 ({gpu_count} GPUs)")
+        config.device = "cuda"
+        config.batch_size = 2 
+        config.mixed_precision = True
+        config.use_data_parallel = True
+        
+        # 显示GPU信息
+        for i in range(gpu_count):
+            gpu_name = torch.cuda.get_device_name(i)
+            gpu_memory = torch.cuda.get_device_properties(i).total_memory / 1e9
+            logger.info(f"   GPU {i}: {gpu_name} ({gpu_memory:.1f}GB)")
     
     # 🔥 启用增强功能进行测试
     if ENHANCED_FEATURES_AVAILABLE:
         config.apply_enhanced_preset('debug')
+        logger.info("✅ 增强功能已启用用于测试")
+    
+    # 📊 测试步骤
+    test_results = {
+        'gpu_count': gpu_count,
+        'config': config.device,
+        'batch_size': config.batch_size,
+        'steps': []
+    }
     
     try:
-        # 创建训练器
+
         trainer = DiffoldTrainer(config)
+        test_results['steps'].append('✅ 模型初始化成功')
+        logger.info("✅ 模型初始化成功")
         
-        # 运行训练
+        # 测试模型设备分布
+        if hasattr(trainer.model, 'module'):
+            model_devices = set()
+            for param in trainer.model.module.parameters():
+                model_devices.add(param.device)
+            logger.info(f"📍 模型参数分布在设备: {model_devices}")
+        
+        logger.info("🧪 完整训练流程测试")
+        
+        # 运行完整训练流程
         trainer.train()
+        test_results['steps'].append('✅ 完整训练流程成功')
         
-        logger.info("✅ 小规模测试完成!")
-        logger.info(f"📁 输出目录: {config.output_dir}")
-        logger.info(f"📁 检查点目录: {config.checkpoint_dir}")
+        logger.info("=" * 60)
+        logger.info("🎉 多GPU环境测试完成!")
+        logger.info("📊 测试结果总结:")
+        logger.info(f"   🖥️  GPU数量: {test_results['gpu_count']}")
+        logger.info(f"   ⚙️  配置: {test_results['config']}")
+        logger.info(f"   📦 批次大小: {test_results['batch_size']}")
+        logger.info("   📋 完成步骤:")
+        for step in test_results['steps']:
+            logger.info(f"      {step}")
         
-        exit()
+        logger.info(f"📁 测试输出: {config.output_dir}")
+        logger.info(f"📁 测试检查点: {config.checkpoint_dir}")
+        
+        # 🧹 清理测试文件（可选）
+        cleanup_choice = input("\n🧹 是否清理测试文件? (y/n): ").lower().strip()
+        if cleanup_choice == 'y':
+            import shutil
+            import os
+            if os.path.exists(config.output_dir):
+                shutil.rmtree(config.output_dir)
+                logger.info(f"🗑️  已删除: {config.output_dir}")
+            if os.path.exists(config.checkpoint_dir):
+                shutil.rmtree(config.checkpoint_dir)
+                logger.info(f"🗑️  已删除: {config.checkpoint_dir}")
+        
+        logger.info("✅ 测试完成，环境准备就绪！")
+        
     except Exception as e:
-        logger.error(f"❌ 小规模测试失败: {e}")
+        logger.error(f"❌ 多GPU测试失败: {e}")
+        logger.error("📋 失败信息:")
         import traceback
         traceback.print_exc()
-
-
-def fix_checkpoint_learning_rate(checkpoint_path, new_lr):
-    """修复检查点中的学习率 - 针对预热bug的快速修复"""
-    import shutil
     
-    if not os.path.exists(checkpoint_path):
-        logger.error(f"检查点不存在: {checkpoint_path}")
-        return False
-    
-    # 备份
-    backup_path = f"{checkpoint_path}.backup"
-    if not os.path.exists(backup_path):
-        shutil.copy2(checkpoint_path, backup_path)
-        logger.info(f"已备份检查点至: {backup_path}")
-    
-    # 修复学习率 - 兼容PyTorch 2.6的安全机制
-    checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
-    
-    if 'optimizer_state_dict' in checkpoint:
-        optimizer_state = checkpoint['optimizer_state_dict']
-        if 'param_groups' in optimizer_state:
-            for group in optimizer_state['param_groups']:
-                old_lr = group['lr']
-                group['lr'] = new_lr
-                logger.info(f"🔧 修复学习率: {old_lr:.2e} → {new_lr:.2e}")
-    
-    # 重置调度器状态，使用plateau调度器避免继续下降
-    if 'scheduler_state_dict' in checkpoint:
-        logger.info("🔄 重置调度器状态，改用plateau调度器")
-        del checkpoint['scheduler_state_dict']
-        # 添加配置信息，让恢复时使用plateau调度器
-        checkpoint['use_plateau_scheduler'] = True
-    
-    torch.save(checkpoint, checkpoint_path)
-    logger.info(f"✅ 学习率修复完成: {checkpoint_path}")
-    return True
-
+    exit()
 
 def main():
     """主函数"""
@@ -1180,7 +1234,8 @@ def main():
     # 输出参数
     parser.add_argument("--output_dir", type=str, default="./output", help="输出目录")
     parser.add_argument("--checkpoint_dir", type=str, default="./checkpoints", help="检查点目录")
-    parser.add_argument("--save_every", type=int, default=5, help="每N轮保存一次")
+    parser.add_argument("--save_every", type=int, default=1, help="每N轮保存检查点")
+    parser.add_argument("--plot_every", type=int, default=1, help="每N轮保存训练曲线")
     
     # 设备参数
     parser.add_argument("--device", type=str, default="auto", help="设备 (auto/cpu/cuda)")
@@ -1211,42 +1266,17 @@ def main():
     
     # 其他参数
     parser.add_argument("--resume", type=str, default=None, help="从检查点恢复训练")
-    parser.add_argument("--test", action="store_true", help="运行小规模测试")
-    
-    # 🔧 学习率修复参数
-    parser.add_argument("--fix_lr", type=float, default=None, 
-                       help="修复检查点中的学习率 (配合--resume使用)")
-    parser.add_argument("--fix_lr_only", action="store_true",
-                       help="仅修复学习率，不开始训练")
+    parser.add_argument("--test", action="store_true", help="运行多GPU环境小规模测试")
+    parser.add_argument("--test_gpu_count", type=int, default=None, help="限制测试使用的GPU数量")
+
     
     args = parser.parse_args()
     
     # 如果是测试模式
     if args.test:
-        run_small_scale_test()
+        run_small_scale_test(gpu_limit=args.test_gpu_count)
         return
-    
-    # 🔧 处理学习率修复
-    if args.fix_lr is not None:
-        if args.resume is None:
-            logger.error("❌ 使用 --fix_lr 需要指定 --resume 检查点路径")
-            return
-        
-        logger.info(f"🔧 开始修复学习率: {args.fix_lr}")
-        success = fix_checkpoint_learning_rate(args.resume, args.fix_lr)
-        
-        if success:
-            logger.info("✅ 学习率修复完成!")
-            if args.fix_lr_only:
-                logger.info("💡 使用以下命令恢复训练:")
-                logger.info(f"python train.py --resume {args.resume}")
-                return
-            else:
-                logger.info("🚀 继续开始训练...")
-        else:
-            logger.error("❌ 学习率修复失败")
-            return
-    
+
     # 创建配置
     config = TrainingConfig()
     
@@ -1297,6 +1327,7 @@ def main():
     config.output_dir = args.output_dir
     config.checkpoint_dir = args.checkpoint_dir
     config.save_every = args.save_every
+    config.plot_every = args.plot_every
     
     if args.device == "auto":
         config.device = "cuda" if torch.cuda.is_available() else "cpu"

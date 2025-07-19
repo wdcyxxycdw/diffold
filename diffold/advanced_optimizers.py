@@ -556,19 +556,98 @@ class EvaluationMetrics:
     def _compute_rmsd(self, 
                      pred_coords: torch.Tensor, 
                      target_coords: torch.Tensor) -> torch.Tensor:
-        """计算RMSD"""
+        """计算结构对齐后的RMSD (使用Kabsch算法)"""
         # 确保坐标形状匹配
         if pred_coords.shape != target_coords.shape:
             min_len = min(pred_coords.shape[1], target_coords.shape[1])
             pred_coords = pred_coords[:, :min_len]
             target_coords = target_coords[:, :min_len]
         
-        # 计算平方差
-        diff = pred_coords - target_coords
-        squared_diff = torch.sum(diff ** 2, dim=-1)  # 对x,y,z维度求和
+        # 检查坐标维度和有效性
+        if pred_coords.dim() != 3 or target_coords.dim() != 3:
+            logger.warning(f"坐标维度错误: pred {pred_coords.shape}, target {target_coords.shape}")
+            # 回退到原始计算
+            diff = pred_coords - target_coords
+            squared_diff = torch.sum(diff ** 2, dim=-1)
+            return torch.sqrt(torch.mean(squared_diff, dim=-1))
         
-        # 计算每个样本的RMSD
-        rmsd = torch.sqrt(torch.mean(squared_diff, dim=-1))  # 对原子维度求平均
+        if pred_coords.shape[-1] != 3 or target_coords.shape[-1] != 3:
+            logger.warning(f"坐标不是3D: pred {pred_coords.shape}, target {target_coords.shape}")
+            # 回退到原始计算
+            diff = pred_coords - target_coords
+            squared_diff = torch.sum(diff ** 2, dim=-1)
+            return torch.sqrt(torch.mean(squared_diff, dim=-1))
+        
+        try:
+            return self._compute_aligned_rmsd_kabsch(pred_coords, target_coords)
+        except Exception as e:
+            logger.warning(f"Kabsch对齐失败，使用未对齐RMSD: {e}")
+            # 回退到原始计算
+            diff = pred_coords - target_coords
+            squared_diff = torch.sum(diff ** 2, dim=-1)
+            return torch.sqrt(torch.mean(squared_diff, dim=-1))
+    
+    def _compute_aligned_rmsd_kabsch(self, 
+                                   pred_coords: torch.Tensor, 
+                                   target_coords: torch.Tensor) -> torch.Tensor:
+        """使用Kabsch算法计算对齐后的RMSD
+        
+        Args:
+            pred_coords: [batch_size, n_atoms, 3] 预测坐标
+            target_coords: [batch_size, n_atoms, 3] 目标坐标
+            
+        Returns:
+            rmsd: [batch_size] 每个样本的对齐RMSD
+        """
+        batch_size, n_atoms, _ = pred_coords.shape
+        device = pred_coords.device
+        
+        # 1. 质心对齐 (centering)
+        pred_centroid = torch.mean(pred_coords, dim=1, keepdim=True)  # [B, 1, 3]
+        target_centroid = torch.mean(target_coords, dim=1, keepdim=True)  # [B, 1, 3]
+        
+        pred_centered = pred_coords - pred_centroid  # [B, N, 3]
+        target_centered = target_coords - target_centroid  # [B, N, 3]
+        
+        # 2. Kabsch算法：计算最优旋转矩阵
+        # H = P^T * Q (协方差矩阵)
+        H = torch.bmm(pred_centered.transpose(-2, -1), target_centered)  # [B, 3, 3]
+        
+        # SVD分解: H = U * S * V^T
+        try:
+            U, S, Vt = torch.svd(H)  # U:[B,3,3], S:[B,3], Vt:[B,3,3]
+        except RuntimeError as e:
+            if "svd_cuda" in str(e):
+                # 如果CUDA SVD失败，转到CPU计算
+                H_cpu = H.cpu()
+                U_cpu, S_cpu, Vt_cpu = torch.svd(H_cpu)
+                U, S, Vt = U_cpu.to(device), S_cpu.to(device), Vt_cpu.to(device)
+            else:
+                raise e
+        
+        # 计算旋转矩阵 R = V * U^T
+        R = torch.bmm(Vt.transpose(-2, -1), U.transpose(-2, -1))  # [B, 3, 3]
+        
+        # 检查并修正反射 (确保det(R) = 1)
+        det_R = torch.det(R)  # [B]
+        reflection_mask = det_R < 0  # [B]
+        
+        if reflection_mask.any():
+            # 对于反射情况，翻转V的最后一列
+            Vt_corrected = Vt.clone()
+            Vt_corrected[reflection_mask, :, -1] *= -1
+            R[reflection_mask] = torch.bmm(
+                Vt_corrected[reflection_mask].transpose(-2, -1), 
+                U[reflection_mask].transpose(-2, -1)
+            )
+        
+        # 3. 应用旋转对齐
+        pred_aligned = torch.bmm(pred_centered, R)  # [B, N, 3]
+        
+        # 4. 计算对齐后的RMSD
+        diff = pred_aligned - target_centered  # [B, N, 3]
+        squared_diff = torch.sum(diff ** 2, dim=-1)  # [B, N]
+        rmsd = torch.sqrt(torch.mean(squared_diff, dim=-1))  # [B]
         
         return rmsd
     
