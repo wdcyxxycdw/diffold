@@ -578,6 +578,10 @@ class EvaluationMetrics:
             squared_diff = torch.sum(diff ** 2, dim=-1)
             return torch.sqrt(torch.mean(squared_diff, dim=-1))
         
+        # 快速检查：如果坐标完全相同，直接返回0
+        if torch.allclose(pred_coords, target_coords, atol=1e-6):
+            return torch.zeros(pred_coords.shape[0], device=pred_coords.device)
+        
         try:
             return self._compute_aligned_rmsd_kabsch(pred_coords, target_coords)
         except Exception as e:
@@ -590,11 +594,14 @@ class EvaluationMetrics:
     def _compute_aligned_rmsd_kabsch(self, 
                                    pred_coords: torch.Tensor, 
                                    target_coords: torch.Tensor) -> torch.Tensor:
-        """使用Kabsch算法计算对齐后的RMSD
+        """使用标准Kabsch算法计算对齐后的RMSD
+        
+        标准Kabsch算法实现，参考经典论文和可靠实现
+        W. Kabsch (1976) "A solution for the best rotation to relate two sets of vectors"
         
         Args:
-            pred_coords: [batch_size, n_atoms, 3] 预测坐标
-            target_coords: [batch_size, n_atoms, 3] 目标坐标
+            pred_coords: [batch_size, n_atoms, 3] 预测坐标 (要被对齐的点集)
+            target_coords: [batch_size, n_atoms, 3] 目标坐标 (参考点集)
             
         Returns:
             rmsd: [batch_size] 每个样本的对齐RMSD
@@ -602,54 +609,68 @@ class EvaluationMetrics:
         batch_size, n_atoms, _ = pred_coords.shape
         device = pred_coords.device
         
-        # 1. 质心对齐 (centering)
+        # 快速检查：如果坐标完全相同，直接返回0
+        if torch.allclose(pred_coords, target_coords, atol=1e-6):
+            return torch.zeros(batch_size, device=device)
+        
+        # 1. 质心对齐
         pred_centroid = torch.mean(pred_coords, dim=1, keepdim=True)  # [B, 1, 3]
         target_centroid = torch.mean(target_coords, dim=1, keepdim=True)  # [B, 1, 3]
         
         pred_centered = pred_coords - pred_centroid  # [B, N, 3]
         target_centered = target_coords - target_centroid  # [B, N, 3]
         
-        # 2. Kabsch算法：计算最优旋转矩阵
-        # H = P^T * Q (协方差矩阵)
+        # 2. 计算交叉协方差矩阵 H = pred_centered^T @ target_centered
         H = torch.bmm(pred_centered.transpose(-2, -1), target_centered)  # [B, 3, 3]
         
-        # SVD分解: H = U * S * V^T
+        # 3. SVD分解: H = U @ S @ V^T
         try:
-            U, S, Vt = torch.svd(H)  # U:[B,3,3], S:[B,3], Vt:[B,3,3]
-        except RuntimeError as e:
-            if "svd_cuda" in str(e):
-                # 如果CUDA SVD失败，转到CPU计算
-                H_cpu = H.cpu()
-                U_cpu, S_cpu, Vt_cpu = torch.svd(H_cpu)
-                U, S, Vt = U_cpu.to(device), S_cpu.to(device), Vt_cpu.to(device)
-            else:
-                raise e
+            # 使用稳定的SVD分解
+            U, S, Vt = torch.linalg.svd(H) if hasattr(torch.linalg, 'svd') else torch.svd(H)
+        except Exception as e:
+            logger.warning(f"SVD分解失败: {e}")
+            # 回退到未对齐RMSD
+            diff = pred_coords - target_coords
+            return torch.sqrt(torch.mean(torch.sum(diff ** 2, dim=-1), dim=-1))
         
-        # 计算旋转矩阵 R = V * U^T
-        R = torch.bmm(Vt.transpose(-2, -1), U.transpose(-2, -1))  # [B, 3, 3]
+        # 4. 计算旋转矩阵 R = V @ U^T
+        # 注意：这里V是Vt的转置
+        V = Vt.transpose(-2, -1)  # [B, 3, 3]
+        R = torch.bmm(U, Vt)  # [B, 3, 3]
         
-        # 检查并修正反射 (确保det(R) = 1)
+        # 5. 处理反射情况：确保det(R) = +1（右手系）
         det_R = torch.det(R)  # [B]
-        reflection_mask = det_R < 0  # [B]
         
-        if reflection_mask.any():
-            # 对于反射情况，翻转V的最后一列
-            Vt_corrected = Vt.clone()
-            Vt_corrected[reflection_mask, :, -1] *= -1
-            R[reflection_mask] = torch.bmm(
-                Vt_corrected[reflection_mask].transpose(-2, -1), 
-                U[reflection_mask].transpose(-2, -1)
-            )
+        # 对于det(R) < 0的情况，修正V的最后一列
+        det_R = torch.det(R)
+        neg_mask = det_R < 0
+        if neg_mask.any():
+            # 在 U 的最后一列乘 -1 再重算 R
+            U_fix = U.clone()
+            U_fix[neg_mask, :, -1] *= -1
+            R[neg_mask] = torch.bmm(U_fix[neg_mask], Vt[neg_mask])
         
-        # 3. 应用旋转对齐
+        # 6. 应用最优旋转：pred_aligned = pred_centered @ R
         pred_aligned = torch.bmm(pred_centered, R)  # [B, N, 3]
         
-        # 4. 计算对齐后的RMSD
+        # 7. 计算对齐后的RMSD
         diff = pred_aligned - target_centered  # [B, N, 3]
-        squared_diff = torch.sum(diff ** 2, dim=-1)  # [B, N]
-        rmsd = torch.sqrt(torch.mean(squared_diff, dim=-1))  # [B]
+        squared_distances = torch.sum(diff ** 2, dim=-1)  # [B, N]
+        rmsd = torch.sqrt(torch.mean(squared_distances, dim=-1))  # [B]
         
-        return rmsd
+        # 8. 验证结果的合理性
+        # 计算未对齐RMSD作为上界
+        unaligned_diff = pred_coords - target_coords
+        unaligned_rmsd = torch.sqrt(torch.mean(torch.sum(unaligned_diff ** 2, dim=-1), dim=-1))
+        
+        # 正常情况下，对齐后的RMSD应该小于等于未对齐的RMSD
+        # 如果不是，说明算法有问题，但我们仍然返回结果并记录警告
+        worse_alignment = rmsd > unaligned_rmsd * 1.01  # 允许1%的数值误差
+        if worse_alignment.any():
+            logger.warning(f"警告: {worse_alignment.sum()}/{batch_size} 个样本的对齐RMSD大于未对齐RMSD")
+        
+        return torch.clamp(rmsd, min=0.0)
+    
     
     def compute_metrics(self) -> Dict[str, float]:
         """计算最终指标"""
