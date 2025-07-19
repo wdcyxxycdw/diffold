@@ -95,6 +95,11 @@ class TrainingConfig:
         self.num_folds = 10
         self.use_all_folds = False
         
+        # 🔥 过拟合测试配置
+        self.overfitting_test = False  # 是否启用过拟合测试
+        self.overfitting_samples = ["1a1t-3", "1asz-1", "1ehz-1"]  # 指定用于过拟合测试的样本名
+        self.overfitting_from_train = True  # 是否从训练集中选择样本作为验证集
+        
         # 🔥 增强功能配置
         self.enhanced_features = {
             'enable_enhanced_training': ENHANCED_FEATURES_AVAILABLE,  # 总开关
@@ -358,18 +363,28 @@ class DiffoldTrainer:
         if self.is_main_process:
             logger.info("设置数据加载器...")
         
-        # 创建基础数据加载器，传递分布式信息
-        train_loader, valid_loader = create_data_loaders(
-            data_dir=self.config.data_dir,
-            batch_size=self.config.batch_size,
-            max_length=self.config.max_sequence_length,
-            num_workers=self.config.num_workers,
-            fold=self.config.fold,
-            use_msa=self.config.use_msa,
-            use_all_folds=self.config.use_all_folds,
-            world_size=self.world_size,
-            local_rank=self.local_rank
-        )
+        # 🔥 过拟合测试模式
+        if self.config.overfitting_test:
+            if self.is_main_process:
+                logger.info("🧪 启用过拟合测试模式 - 验证集将使用训练集样本")
+                logger.info(f"指定的过拟合测试样本: {self.config.overfitting_samples}")
+            
+            # 创建特殊的过拟合测试数据加载器
+            train_loader, valid_loader = self._create_overfitting_dataloaders()
+        else:
+            # 正常模式：创建基础数据加载器，传递分布式信息
+            train_loader, valid_loader = create_data_loaders(
+                data_dir=self.config.data_dir,
+                batch_size=self.config.batch_size,
+                max_length=self.config.max_sequence_length,
+                num_workers=self.config.num_workers,
+                fold=self.config.fold,
+                use_msa=self.config.use_msa,
+                use_all_folds=self.config.use_all_folds,
+                world_size=self.world_size,
+                local_rank=self.local_rank
+            )
+        
         # 🔥 应用数据加载优化
         if (self.enhanced_enabled and 
             self.config.enhanced_features['dataloader']['enable_prefetch']):
@@ -394,6 +409,90 @@ class DiffoldTrainer:
         if self.is_main_process:
             logger.info(f"训练集大小: {len(train_loader)}")
             logger.info(f"验证集大小: {len(valid_loader)}")
+    
+    def _create_overfitting_dataloaders(self):
+        """创建过拟合测试用的数据加载器"""
+        from diffold.dataloader import RNA3DDataLoader, RNA3DDataset
+        from torch.utils.data import DataLoader, Subset
+        
+        # 创建完整的训练数据集
+        full_train_dataset = RNA3DDataset(
+            data_dir=self.config.data_dir,
+            fold=self.config.fold,
+            split="train",
+            max_length=self.config.max_sequence_length,
+            use_msa=self.config.use_msa,
+            enable_missing_atom_mask=True
+        )
+        
+        # 查找指定的样本在训练集中的索引
+        target_indices = []
+        found_samples = []
+        
+        for idx, sample in enumerate(full_train_dataset.samples):
+            sample_name = sample['name']
+            if sample_name in self.config.overfitting_samples:
+                target_indices.append(idx)
+                found_samples.append(sample_name)
+        
+        if not target_indices:
+            logger.warning(f"⚠️ 在训练集中未找到指定的过拟合测试样本: {self.config.overfitting_samples}")
+            logger.info("回退到使用前几个训练样本作为验证集")
+            target_indices = list(range(min(3, len(full_train_dataset))))
+            found_samples = [full_train_dataset.samples[i]['name'] for i in target_indices]
+        
+        logger.info(f"✅ 找到过拟合测试样本: {found_samples}")
+        
+        # 创建验证集（使用指定的训练样本）
+        overfitting_valid_dataset = Subset(full_train_dataset, target_indices)
+        
+        # 创建数据加载器
+        from diffold.dataloader import collate_fn
+        
+        if self.world_size > 1:
+            from torch.utils.data.distributed import DistributedSampler
+            train_sampler = DistributedSampler(full_train_dataset, num_replicas=self.world_size, 
+                                             rank=self.local_rank, shuffle=True, drop_last=True)
+            valid_sampler = DistributedSampler(overfitting_valid_dataset, num_replicas=self.world_size, 
+                                             rank=self.local_rank, shuffle=False, drop_last=False)
+            
+            train_loader = DataLoader(
+                full_train_dataset,
+                batch_size=self.config.batch_size,
+                shuffle=False,
+                sampler=train_sampler,
+                num_workers=self.config.num_workers,
+                collate_fn=collate_fn,
+                pin_memory=True
+            )
+            valid_loader = DataLoader(
+                overfitting_valid_dataset,
+                batch_size=self.config.batch_size,
+                shuffle=False,
+                sampler=valid_sampler,
+                num_workers=self.config.num_workers,
+                collate_fn=collate_fn,
+                pin_memory=True
+            )
+        else:
+            train_loader = DataLoader(
+                full_train_dataset,
+                batch_size=self.config.batch_size,
+                shuffle=True,
+                num_workers=self.config.num_workers,
+                collate_fn=collate_fn,
+                pin_memory=True
+            )
+            valid_loader = DataLoader(
+                overfitting_valid_dataset,
+                batch_size=self.config.batch_size,
+                shuffle=False,
+                num_workers=self.config.num_workers,
+                collate_fn=collate_fn,
+                pin_memory=True
+            )
+        
+        return train_loader, valid_loader
     
     def setup_optimizer_and_scheduler(self):
         """设置优化器和调度器"""
@@ -1096,7 +1195,7 @@ def run_small_scale_test(gpu_limit=None):
     # 基础测试配置
     config = TrainingConfig()
     config.test_mode = True
-    config.test_epochs = 4  # 测试2轮，验证完整流程
+    config.test_epochs = 100  # 测试2轮，验证完整流程
     config.test_samples = 4   # 稍微增加样本数测试批次处理
     config.max_sequence_length = 128
     config.num_workers = 2   # 测试数据加载
@@ -1155,7 +1254,6 @@ def run_small_scale_test(gpu_limit=None):
     }
     
     try:
-
         trainer = DiffoldTrainer(config)
         test_results['steps'].append('✅ 模型初始化成功')
         logger.info("✅ 模型初始化成功")
@@ -1219,6 +1317,11 @@ def main():
     parser.add_argument("--num_workers", type=int, default=4, help="数据加载进程数")
     parser.add_argument("--fold", type=int, default=0, help="交叉验证折数 (0-9)")
     parser.add_argument("--use_all_folds", action="store_true", help="使用所有折数的数据进行训练")
+    
+    # 🔥 过拟合测试参数
+    parser.add_argument("--overfitting_test", action="store_true", help="启用过拟合测试模式（验证集使用训练集样本）")
+    parser.add_argument("--overfitting_samples", type=str, nargs='+', default=["1a1t-3", "1asz-1", "1ehz-1"], 
+                       help="指定用于过拟合测试的样本名")
     
     # 训练参数
     parser.add_argument("--epochs", type=int, default=100, help="训练轮数")
@@ -1318,6 +1421,10 @@ def main():
     config.fold = args.fold
     config.use_all_folds = args.use_all_folds
     
+    # 🔥 过拟合测试配置
+    config.overfitting_test = args.overfitting_test
+    config.overfitting_samples = args.overfitting_samples
+    
     config.num_epochs = args.epochs
     config.learning_rate = args.learning_rate
     config.weight_decay = args.weight_decay
@@ -1357,6 +1464,14 @@ def main():
     logger.info(f"🖥️  设备: {config.device}")
     logger.info(f"⏱️  训练轮数: {config.num_epochs}")
     logger.info(f"📊 学习率: {config.learning_rate}")
+    logger.info(f"🔄 交叉验证fold: {config.fold}")
+    
+    # 🔥 显示过拟合测试状态
+    if config.overfitting_test:
+        logger.info("🧪 过拟合测试: 已启用")
+        logger.info(f"   测试样本: {config.overfitting_samples}")
+    else:
+        logger.info("🧪 过拟合测试: 已禁用")
     
     # 🔥 显示增强功能状态
     if config.enhanced_features.get('enable_enhanced_training', False):
