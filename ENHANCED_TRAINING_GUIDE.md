@@ -183,7 +183,24 @@ python examples/enhanced_training_example.py --scenario memory
 python examples/enhanced_training_example.py --preset large_model --scenario safety
 ```
 
-### 2. 在现有训练脚本中集成
+### 2. 🧪 **模型正确性验证（过拟合测试）**
+
+测试模式会自动使用训练集中的样本作为验证集，用于验证模型是否正确实现：
+
+```bash
+# 基础过拟合测试
+python train.py --test
+
+# 自定义测试参数
+python train.py --test --epochs 10 --batch_size 2
+
+# 结合其他模式
+python train.py --test --enhanced_preset debug --epochs 5
+```
+
+**预期效果**：正确实现的模型应该能够快速过拟合到训练样本上，验证损失和RMSD应该显著下降。
+
+### 3. 在现有训练脚本中集成
 
 ```python
 # 1. 替换配置系统
