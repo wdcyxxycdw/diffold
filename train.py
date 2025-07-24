@@ -312,13 +312,14 @@ class DiffoldTrainer:
             self.training_monitor = TrainingMonitor(self.config.output_dir)
             logger.info("✅ 训练监控已启用")
         
-        # 评估指标
+        # RNA评估指标
         if self.config.enhanced_features['evaluation']['compute_structure_metrics']:
+            from diffold.advanced_optimizers import RNAEvaluationMetrics
             self.enhanced_metrics = {
-                'train': EvaluationMetrics(),
-                'val': EvaluationMetrics()
+                'train': RNAEvaluationMetrics(),
+                'val': RNAEvaluationMetrics()
             }
-            logger.info("✅ 增强评估指标已启用")
+            logger.info("✅ RNA专用评估指标已启用")
     
     def setup_directories(self):
         """创建必要的目录"""
@@ -967,8 +968,23 @@ class DiffoldTrainer:
                 train_metrics = self.enhanced_metrics['train'].compute_metrics()
                 val_metrics = self.enhanced_metrics['val'].compute_metrics() if valid_loss is not None else {}
                 
-                if 'avg_rmsd' in val_metrics and self.is_main_process:
-                    logger.info(f"验证RMSD: {val_metrics['avg_rmsd']:.4f}")
+                if val_metrics and self.is_main_process:
+                    # RNA结构评估指标输出
+                    metrics_log = "🧬 RNA结构评估:"
+                    if 'avg_rmsd' in val_metrics:
+                        metrics_log += f" RMSD={val_metrics['avg_rmsd']:.4f}Å"
+                    if 'avg_tm_score' in val_metrics:
+                        metrics_log += f" TM-score={val_metrics['avg_tm_score']:.3f}"
+                        if 'tm_score_good_ratio' in val_metrics:
+                            metrics_log += f"({val_metrics['tm_score_good_ratio']:.1%}≥0.45)"
+                    if 'avg_lddt' in val_metrics:
+                        metrics_log += f" lDDT={val_metrics['avg_lddt']:.1f}"
+                        if 'lddt_high_quality_ratio' in val_metrics:
+                            metrics_log += f"({val_metrics['lddt_high_quality_ratio']:.1%}≥70)"
+                    if 'avg_clash_score' in val_metrics:
+                        metrics_log += f" Clash={val_metrics['avg_clash_score']:.1f}%"
+                    
+                    logger.info(metrics_log)
             
             # 只在主进程写tensorboard
             if self.is_main_process:
@@ -977,6 +993,23 @@ class DiffoldTrainer:
                     self.writer.add_scalar('Loss/Valid', valid_loss, epoch)
                 self.writer.add_scalar('LearningRate', current_lr, epoch)
                 self.writer.add_scalar('EpochTime', epoch_time, epoch)
+                
+                # 🔥 记录RNA结构评估指标到TensorBoard
+                if val_metrics:
+                    if 'avg_rmsd' in val_metrics:
+                        self.writer.add_scalar('RNA_Metrics/RMSD', val_metrics['avg_rmsd'], epoch)
+                    if 'avg_tm_score' in val_metrics:
+                        self.writer.add_scalar('RNA_Metrics/TM_Score', val_metrics['avg_tm_score'], epoch)
+                        if 'tm_score_good_ratio' in val_metrics:
+                            self.writer.add_scalar('RNA_Metrics/TM_Score_Good_Ratio', 
+                                                 val_metrics['tm_score_good_ratio'], epoch)
+                    if 'avg_lddt' in val_metrics:
+                        self.writer.add_scalar('RNA_Metrics/lDDT', val_metrics['avg_lddt'], epoch)
+                        if 'lddt_high_quality_ratio' in val_metrics:
+                            self.writer.add_scalar('RNA_Metrics/lDDT_High_Quality_Ratio', 
+                                                 val_metrics['lddt_high_quality_ratio'], epoch)
+                    if 'avg_clash_score' in val_metrics:
+                        self.writer.add_scalar('RNA_Metrics/Clash_Score', val_metrics['avg_clash_score'], epoch)
             
             # 计算预计时间
             current_time = time.time()
