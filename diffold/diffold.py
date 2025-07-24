@@ -23,8 +23,8 @@ from alphafold3_pytorch.alphafold3 import(
     IS_DNA_INDEX,
 )
 from alphafold3_pytorch.inputs import NUM_MOLECULE_IDS
-from .input_processor import process_alphafold3_input, process_multiple_alphafold3_inputs, align_input
-from .mask_validator import MaskValidator
+from diffold.input_processor import process_alphafold3_input, process_multiple_alphafold3_inputs
+from diffold.mask_validator import MaskValidator
 
 from rhofold.rhofold import RhoFold
 
@@ -524,8 +524,26 @@ class Diffold(nn.Module):
         distogram_labels = torch.where(final_mask, distogram_labels, self.ignore_index)
         
         return distogram_labels
-    
 
+    def freeze_rhofold(self):
+        """冻结RhoFold模型参数"""
+        for param in self.rhofold.parameters():
+            param.requires_grad = False
+        self.rhofold.eval()
+    
+    def unfreeze_rhofold(self):
+        """解冻RhoFold模型参数"""
+        for param in self.rhofold.parameters():
+            param.requires_grad = True
+        self.rhofold.train()
+    
+    def get_trainable_parameters(self):
+        """获取可训练的参数（排除RhoFold）"""
+        trainable_params = []
+        for name, param in self.named_parameters():
+            if not name.startswith('rhofold.') and param.requires_grad:
+                trainable_params.append(param)
+        return trainable_params
 
     def set_train_mode(self):
         """设置为训练模式"""
@@ -599,7 +617,7 @@ class Diffold(nn.Module):
             else:
                 with torch.no_grad():
                     logger.debug("RhoFold输入:", tokens.shape, rna_fm_tokens.shape if rna_fm_tokens is not None else 'None')
-                    outputs, single_fea, pair_fea = self.rhofold(tokens, rna_fm_tokens, seq[0], **kwargs)
+                    outputs, single_fea, pair_fea = self.rhofold(tokens, rna_fm_tokens, seq, **kwargs)
         except Exception as e:
             logger.error(f"⚠️ RhoFold前向传播失败: {e}")
             import traceback
@@ -683,7 +701,7 @@ class Diffold(nn.Module):
             logger.warning("没有目标坐标")
             exit()
 
-        logger.debug("AlphaFold3输入（对齐前）:",
+        logger.debug("AlphaFold3输入:",
             "atom_inputs", af_in.atom_inputs.shape if af_in.atom_inputs is not None else 'None',
             "atompair_inputs", af_in.atompair_inputs.shape if af_in.atompair_inputs is not None else 'None',
             "additional_token_feats", af_in.additional_token_feats.shape if af_in.additional_token_feats is not None else 'None',
@@ -691,25 +709,6 @@ class Diffold(nn.Module):
             "molecule_ids", af_in.molecule_ids.shape if af_in.molecule_ids is not None else 'None',
             "atom_mask", atom_mask.shape if atom_mask is not None else 'None'
         )
-
-        # 🔧 使用align_input函数将AlphaFold3格式转换为RhoFold+格式
-        logger.debug("开始格式对齐：AlphaFold3 -> RhoFold+")
-        af_in_aligned, aligned_atom_mask = align_input(af_in, seq)
-        
-        # 更新atom_mask为对齐后的版本
-        atom_mask = aligned_atom_mask
-        
-        logger.debug("AlphaFold3输入（对齐后）:",
-            "atom_inputs", af_in_aligned.atom_inputs.shape if af_in_aligned.atom_inputs is not None else 'None',
-            "atompair_inputs", af_in_aligned.atompair_inputs.shape if af_in_aligned.atompair_inputs is not None else 'None',
-            "additional_token_feats", af_in_aligned.additional_token_feats.shape if af_in_aligned.additional_token_feats is not None else 'None',
-            "molecule_atom_lens", af_in_aligned.molecule_atom_lens.shape if af_in_aligned.molecule_atom_lens is not None else 'None',
-            "molecule_ids", af_in_aligned.molecule_ids.shape if af_in_aligned.molecule_ids is not None else 'None',
-            "atom_mask", atom_mask.shape if atom_mask is not None else 'None'
-        )
-        
-        # 使用对齐后的af_in
-        af_in = af_in_aligned
 
         # 获取设备信息并将所有输入数据移动到正确的设备
         device = tokens.device
@@ -779,64 +778,17 @@ class Diffold(nn.Module):
             logger.error("没有提供molecule_atom_lens")
             exit()
 
-        # 🔧 处理missing_atom_mask的对齐 - 同样需要删除每个碱基最后一个原子的mask
+        # 处理missing_atom_mask的维度对齐
         if af_in.atom_pos is not None and missing_atom_mask is not None:
-            from rhofold.utils.constants import ATOM_NAMES_PER_RESD
-            
-            # 重新计算keep_indices，与align_input函数中的逻辑保持一致
-            ATOMS_PER_BASE = {
-                "A": len(ATOM_NAMES_PER_RESD["A"]),  # 22
-                "G": len(ATOM_NAMES_PER_RESD["G"]),  # 23  
-                "U": len(ATOM_NAMES_PER_RESD["U"]),  # 20
-                "C": len(ATOM_NAMES_PER_RESD["C"])   # 20
-            }
-            
-            # 处理序列格式
-            if isinstance(seq, str):
-                sequences = [seq]
-            elif isinstance(seq, list):
-                sequences = seq
-            else:
-                sequences = seq
-            
-            # 计算需要保留的原子索引（与align_input逻辑一致）
-            keep_indices = []
-            current_atom_idx = 0
-            
-            for sequence in sequences:
-                for base in sequence:
-                    if base in ATOMS_PER_BASE:
-                        atoms_count = ATOMS_PER_BASE[base]
-                        base_keep_indices = list(range(current_atom_idx, current_atom_idx + atoms_count - 1))
-                        keep_indices.extend(base_keep_indices)
-                        current_atom_idx += atoms_count
-            
-            # 对missing_atom_mask进行相同的裁切
-            if len(keep_indices) > 0:
-                keep_indices_tensor = torch.tensor(keep_indices, dtype=torch.long, device=device)
-                
-                # 确保keep_indices不超出missing_atom_mask的范围
-                max_original_atoms = missing_atom_mask.shape[1]
-                valid_keep_indices = keep_indices_tensor[keep_indices_tensor < max_original_atoms]
-                
-                if len(valid_keep_indices) > 0:
-                    missing_atom_mask_aligned = missing_atom_mask[:, valid_keep_indices]
-                    logger.debug(f"对齐missing_atom_mask: {missing_atom_mask.shape} -> {missing_atom_mask_aligned.shape}")
-                    missing_atom_mask = missing_atom_mask_aligned
-                else:
-                    logger.warning("没有有效的keep_indices用于missing_atom_mask对齐")
-            
-            # 检查是否需要进一步扩展missing_atom_mask以匹配af_in.atom_pos
             batch_num = af_in.atom_pos.shape[0]
             padded_atom_num = af_in.atom_pos.shape[1]
-            current_atom_num = missing_atom_mask.shape[1]
-            
-            if padded_atom_num > current_atom_num:    
+            real_atom_num = missing_atom_mask.shape[1]
+            if padded_atom_num > real_atom_num:    
                 missing_atom_mask = torch.cat([
                     missing_atom_mask, 
-                    torch.ones(batch_num, padded_atom_num - current_atom_num, device=device, dtype=missing_atom_mask.dtype)
+                    torch.ones(batch_num, padded_atom_num - real_atom_num, device=device, dtype=missing_atom_mask.dtype)
                 ], dim=1)
-                logger.debug(f"扩展对齐后的missing_atom_mask: {current_atom_num} -> {padded_atom_num}")
+                logger.debug(f"扩展missing_atom_mask: {real_atom_num} -> {padded_atom_num}")
 
         relative_position_encoding = self.relative_position_encoding(
             additional_molecule_feats = af_in.additional_molecule_feats,

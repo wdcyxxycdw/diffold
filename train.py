@@ -25,15 +25,8 @@ from diffold.diffold import Diffold
 from diffold.dataloader import create_data_loaders
 
 # 设置日志
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),  # 控制台输出
-    ]
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)  # 明确设置logger级别
 
 # 🔥 导入增强功能模块
 try:
@@ -345,19 +338,13 @@ class DiffoldTrainer:
         
         # 文件处理器
         file_handler = logging.FileHandler(log_file)
-        file_handler.setLevel(logging.DEBUG)  # 改为DEBUG级别
+        file_handler.setLevel(logging.INFO)
         formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
         file_handler.setFormatter(formatter)
         
         # 添加到logger
         logger.addHandler(file_handler)
-        
-        # 确保diffold模块的logger也使用DEBUG级别
-        diffold_logger = logging.getLogger('diffold')
-        diffold_logger.setLevel(logging.DEBUG)
-        
         logger.info("日志系统已初始化")
-        logger.debug("🐛 DEBUG级别日志已启用，文件和控制台都会记录DEBUG信息")
     
     def setup_model(self):
         """设置模型"""
@@ -1109,9 +1096,9 @@ def run_small_scale_test(gpu_limit=None):
     # 基础测试配置
     config = TrainingConfig()
     config.test_mode = True
-    config.test_epochs = 1  # 测试2轮，验证完整流程
-    config.test_samples = 1  # 稍微增加样本数测试批次处理
-    config.max_sequence_length = 20
+    config.test_epochs = 4  # 测试2轮，验证完整流程
+    config.test_samples = 4   # 稍微增加样本数测试批次处理
+    config.max_sequence_length = 128
     config.num_workers = 2   # 测试数据加载
     config.output_dir = "./test_output"
     config.checkpoint_dir = "./test_checkpoints"
@@ -1138,7 +1125,7 @@ def run_small_scale_test(gpu_limit=None):
     elif gpu_count == 1:
         logger.info("📱 单GPU模式测试")
         config.device = "cuda"
-        config.batch_size = 1
+        config.batch_size = 2
         config.mixed_precision = True
         config.use_data_parallel = False
     else:
@@ -1279,7 +1266,7 @@ def main():
     
     # 其他参数
     parser.add_argument("--resume", type=str, default=None, help="从检查点恢复训练")
-    parser.add_argument("--test", action="store_true", help="运行多GPU环境小规模测试", default=True)
+    parser.add_argument("--test", action="store_true", help="运行多GPU环境小规模测试")
     parser.add_argument("--test_gpu_count", type=int, default=None, help="限制测试使用的GPU数量")
 
     
