@@ -598,7 +598,7 @@ class Diffold(nn.Module):
                 
             else:
                 with torch.no_grad():
-                    logger.debug("RhoFold输入:", tokens.shape, rna_fm_tokens.shape if rna_fm_tokens is not None else 'None')
+                    logger.debug(f"RhoFold输入: {tokens.shape} {rna_fm_tokens.shape if rna_fm_tokens is not None else 'None'}")
                     outputs, single_fea, pair_fea = self.rhofold(tokens, rna_fm_tokens, seq[0], **kwargs)
         except Exception as e:
             logger.error(f"⚠️ RhoFold前向传播失败: {e}")
@@ -746,6 +746,7 @@ class Diffold(nn.Module):
             _,
             atom_feats,
             atompair_feats
+
         ) = self.input_embedder(
             atom_inputs = af_in.atom_inputs,
             atompair_inputs = af_in.atompair_inputs,
