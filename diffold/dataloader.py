@@ -14,7 +14,7 @@ from rhofold.utils.converter import RNAConverter
 from rhofold.utils.constants import RNA_CONSTANTS
 from rhofold.utils.alphabet import get_features, read_fas
 
-from diffold.input_processor import process_alphafold3_input
+# from .input_processor import process_alphafold3_input  # 测试时注释掉
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
@@ -106,9 +106,9 @@ class MissingAtomMaskGenerator:
         sequence = target_sequence if target_sequence is not None else pdb_sequence
         num_residues = len(sequence)
         
-        # 初始化输出张量
+        # 初始化输出张量 - 缺失原子的坐标默认填充为0
         coordinates = torch.zeros(num_residues, int(self.max_atoms_per_residue), 3, dtype=torch.float32)
-        missing_mask = torch.ones(num_residues, int(self.max_atoms_per_residue), dtype=torch.bool)
+        missing_mask = torch.ones(num_residues, int(self.max_atoms_per_residue), dtype=torch.bool)  # 默认全部缺失
         residue_mask = torch.zeros(num_residues, dtype=torch.bool)
         
         # 获取排序后的残基编号
@@ -140,10 +140,11 @@ class MissingAtomMaskGenerator:
                     # 检查每个预期的原子
                     for atom_idx, atom_name in enumerate(expected_atoms):
                         if atom_name in actual_atoms:
-                            # 原子存在
+                            # 原子存在 - 填充真实坐标并标记为非缺失
                             coords = actual_atoms[atom_name]
                             coordinates[seq_idx, atom_idx] = torch.tensor(coords, dtype=torch.float32)
                             missing_mask[seq_idx, atom_idx] = False
+                        # 如果原子不存在，坐标保持为0，missing_mask保持为True
                     
                     pdb_idx += 1
                     break
@@ -448,7 +449,7 @@ class RNA3DDataset(Dataset):
                     )
                 
                 # 转换为平展格式
-                # 只提取有效残基的坐标和掩码
+                # 提取所有预期原子的坐标和掩码，包括缺失的原子（用0坐标填充）
                 flat_coordinates = []
                 flat_missing_mask = []
                 
@@ -460,7 +461,7 @@ class RNA3DDataset(Dataset):
                     res_type = sequence[res_idx]
                     if res_type in ['A', 'G', 'U', 'C']:
                         expected_atoms = len(self.missing_atom_generator.atom_names_per_residue[res_type])
-                        # 只取预期的原子数量
+                        # 取预期的原子数量，缺失原子已经用0坐标填充，mask为True
                         flat_coordinates.append(res_coords[:expected_atoms])
                         flat_missing_mask.append(res_mask[:expected_atoms])
             
@@ -727,6 +728,7 @@ class RNA3DDataLoader:
             num_workers: 数据加载进程数
             cache_dir: 缓存目录
             force_reload: 是否强制重新加载
+            enable_missing_atom_mask: 是否启用缺失原子掩码生成
         """
         self.data_dir = data_dir
         self.batch_size = batch_size
@@ -735,6 +737,7 @@ class RNA3DDataLoader:
         self.num_workers = num_workers
         self.cache_dir = cache_dir
         self.force_reload = force_reload
+        self.enable_missing_atom_mask = enable_missing_atom_mask
         
     def get_dataloader(
         self, 
@@ -762,7 +765,8 @@ class RNA3DDataLoader:
             max_length=self.max_length,
             use_msa=self.use_msa,
             cache_dir=self.cache_dir,
-            force_reload=self.force_reload
+            force_reload=self.force_reload,
+            enable_missing_atom_mask=self.enable_missing_atom_mask
         )
         
         return DataLoader(
@@ -961,6 +965,77 @@ def create_data_loaders(
 
 
 # 使用示例和测试函数
+def test_missing_atom_filling():
+    """测试缺失原子填充功能"""
+    logger.info("测试缺失原子填充功能...")
+    
+    # 创建数据加载器
+    data_loader = RNA3DDataLoader(
+        data_dir="/home/yamanashi/diffold/processed_data",
+        batch_size=1,
+        max_length=512,
+        use_msa=False,
+        num_workers=0,
+        force_reload=False,
+        enable_missing_atom_mask=True
+    )
+    
+    try:
+        train_loader = data_loader.get_train_dataloader(fold=0)
+        logger.info(f"训练样本数: {len(train_loader.dataset)}")
+        
+        # 获取一个样本进行详细检查
+        for batch_idx, batch in enumerate(train_loader):
+            sample_name = batch['names'][0]
+            sequence = batch['sequences'][0]
+            coordinates = batch['coordinates'][0]  # [max_atoms, 3]
+            missing_mask = batch['missing_atom_masks'][0]  # [max_atoms]
+            atom_mask = batch['atom_masks'][0]  # [max_atoms]
+            num_atoms = batch['num_atoms'][0].item()
+            
+            logger.info(f"\n=== 样本详细信息: {sample_name} ===")
+            logger.info(f"序列: {sequence}")
+            logger.info(f"序列长度: {len(sequence)}")
+            logger.info(f"总原子数: {num_atoms}")
+            logger.info(f"坐标张量形状: {coordinates.shape}")
+            logger.info(f"缺失原子掩码形状: {missing_mask.shape}")
+            
+            # 检查每个残基的原子情况
+            atom_idx = 0
+            for res_idx, res_type in enumerate(sequence):
+                if res_type in ['A', 'G', 'U', 'C']:
+                    expected_atoms = len(train_loader.dataset.missing_atom_generator.atom_names_per_residue[res_type])
+                    
+                    # 提取该残基的原子坐标和掩码
+                    res_coords = coordinates[atom_idx:atom_idx + expected_atoms]  # [expected_atoms, 3]
+                    res_missing = missing_mask[atom_idx:atom_idx + expected_atoms]  # [expected_atoms]
+                    res_atom_mask = atom_mask[atom_idx:atom_idx + expected_atoms]  # [expected_atoms]
+                    
+                    # 统计该残基的原子情况
+                    present_atoms = (~res_missing & res_atom_mask).sum().item()
+                    missing_atoms = (res_missing & res_atom_mask).sum().item()
+                    zero_coords = (res_coords.abs().sum(dim=1) == 0).sum().item()
+                    
+                    if missing_atoms > 0:  # 只显示有缺失原子的残基
+                        logger.info(f"  残基 {res_idx+1} ({res_type}): 预期 {expected_atoms} 个原子")
+                        logger.info(f"    - 存在原子: {present_atoms}")
+                        logger.info(f"    - 缺失原子: {missing_atoms}")
+                        logger.info(f"    - 零坐标原子: {zero_coords}")
+                        logger.info(f"    - 缺失原子掩码: {res_missing.tolist()}")
+                    
+                    atom_idx += expected_atoms
+            
+            # 只检查第一个样本
+            break
+            
+        logger.info("✓ 缺失原子填充功能测试完成!")
+        
+    except Exception as e:
+        logger.error(f"✗ 缺失原子填充功能测试失败: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 def test_dataloader():
     """测试数据加载器功能"""
     logger.info("测试RNA3D数据加载器...")
@@ -993,7 +1068,14 @@ def test_dataloader():
             if batch['rna_fm_tokens'] is not None:
                 logger.info(f"  - rMSA Tokens形状: {batch['rna_fm_tokens'].shape}")
             logger.info(f"  - 坐标形状: {batch['coordinates'].shape}")
-            logger.info(f"  - 坐标mask形状: {batch['coord_masks'].shape}")
+            
+            # 检查是否有缺失原子掩码功能
+            if 'missing_atom_masks' in batch:
+                logger.info(f"  - 缺失原子掩码形状: {batch['missing_atom_masks'].shape}")
+                logger.info(f"  - 原子掩码形状: {batch['atom_masks'].shape}")
+                logger.info(f"  - 总原子数: {batch['num_atoms'].tolist()}")
+            else:
+                logger.info(f"  - 坐标mask形状: {batch['coord_masks'].shape}")
             
             # 只测试第一个batch
             break
@@ -1019,4 +1101,10 @@ def test_dataloader():
 
 
 if __name__ == "__main__":
+    # 测试基本数据加载器功能
     test_dataloader()
+    
+    print("\n" + "="*50 + "\n")
+    
+    # 测试缺失原子填充功能
+    test_missing_atom_filling()
