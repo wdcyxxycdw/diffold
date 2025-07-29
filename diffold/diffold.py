@@ -665,15 +665,7 @@ class Diffold(nn.Module):
                 )
                 af_in, atom_mask = result  # type: ignore
             else:
-                # 单个序列的情况，使用原来的方式
-                if missing_atom_mask is not None:
-                    valid_atoms = (~missing_atom_mask[0]).sum().item()
-                    if valid_atoms > 0:
-                        atom_pos_list = [target_coords[0, :valid_atoms]]
-                    else:
-                        atom_pos_list = [torch.empty(0, 3, device=target_coords.device)]
-                else:
-                    atom_pos_list = [target_coords[0]]
+                atom_pos_list = [target_coords[0]]
                 
                 af_in, atom_mask = process_alphafold3_input(
                     ss_rna=[seq[0]] if seq is not None else [],
@@ -683,14 +675,13 @@ class Diffold(nn.Module):
             logger.warning("没有目标坐标")
             exit()
 
-        logger.debug("AlphaFold3输入（对齐前）:",
-            "atom_inputs", af_in.atom_inputs.shape if af_in.atom_inputs is not None else 'None',
-            "atompair_inputs", af_in.atompair_inputs.shape if af_in.atompair_inputs is not None else 'None',
-            "additional_token_feats", af_in.additional_token_feats.shape if af_in.additional_token_feats is not None else 'None',
-            "molecule_atom_lens", af_in.molecule_atom_lens.shape if af_in.molecule_atom_lens is not None else 'None',
-            "molecule_ids", af_in.molecule_ids.shape if af_in.molecule_ids is not None else 'None',
-            "atom_mask", atom_mask.shape if atom_mask is not None else 'None'
-        )
+        logger.debug(f"AlphaFold3输入（对齐前）: "
+                    f"atom_inputs {af_in.atom_inputs.shape if af_in.atom_inputs is not None else 'None'}, "
+                    f"atompair_inputs {af_in.atompair_inputs.shape if af_in.atompair_inputs is not None else 'None'}, "
+                    f"additional_token_feats {af_in.additional_token_feats.shape if af_in.additional_token_feats is not None else 'None'}, "
+                    f"molecule_atom_lens {af_in.molecule_atom_lens.shape if af_in.molecule_atom_lens is not None else 'None'}, "
+                    f"molecule_ids {af_in.molecule_ids.shape if af_in.molecule_ids is not None else 'None'}, "
+                    f"atom_mask {atom_mask.shape if atom_mask is not None else 'None'}")
 
         # 🔧 使用align_input函数将AlphaFold3格式转换为RhoFold+格式
         logger.debug("开始格式对齐：AlphaFold3 -> RhoFold+")
@@ -699,14 +690,13 @@ class Diffold(nn.Module):
         # 更新atom_mask为对齐后的版本
         atom_mask = aligned_atom_mask
         
-        logger.debug("AlphaFold3输入（对齐后）:",
-            "atom_inputs", af_in_aligned.atom_inputs.shape if af_in_aligned.atom_inputs is not None else 'None',
-            "atompair_inputs", af_in_aligned.atompair_inputs.shape if af_in_aligned.atompair_inputs is not None else 'None',
-            "additional_token_feats", af_in_aligned.additional_token_feats.shape if af_in_aligned.additional_token_feats is not None else 'None',
-            "molecule_atom_lens", af_in_aligned.molecule_atom_lens.shape if af_in_aligned.molecule_atom_lens is not None else 'None',
-            "molecule_ids", af_in_aligned.molecule_ids.shape if af_in_aligned.molecule_ids is not None else 'None',
-            "atom_mask", atom_mask.shape if atom_mask is not None else 'None'
-        )
+        logger.debug(f"AlphaFold3输入（对齐后）: "
+                    f"atom_inputs {af_in_aligned.atom_inputs.shape if af_in_aligned.atom_inputs is not None else 'None'}, "
+                    f"atompair_inputs {af_in_aligned.atompair_inputs.shape if af_in_aligned.atompair_inputs is not None else 'None'}, "
+                    f"additional_token_feats {af_in_aligned.additional_token_feats.shape if af_in_aligned.additional_token_feats is not None else 'None'}, "
+                    f"molecule_atom_lens {af_in_aligned.molecule_atom_lens.shape if af_in_aligned.molecule_atom_lens is not None else 'None'}, "
+                    f"molecule_ids {af_in_aligned.molecule_ids.shape if af_in_aligned.molecule_ids is not None else 'None'}, "
+                    f"atom_mask {atom_mask.shape if atom_mask is not None else 'None'}")
         
         # 使用对齐后的af_in
         af_in = af_in_aligned

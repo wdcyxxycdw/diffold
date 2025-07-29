@@ -183,7 +183,7 @@ def align_input(af_in, seq):
     
     # 🔍 记录输入数据的基本信息
     if af_in.atom_pos is not None:
-        logger.debug(f"🔍 AlphaFold3输入原子数: {af_in.atom_pos.shape}")
+        logger.debug(f"🔍 AlphaFold3输入原子数: {af_in.atom_pos.shape[1]}")
     if af_in.molecule_atom_lens is not None:
         total_expected_atoms = af_in.molecule_atom_lens.sum(dim=-1)
         logger.debug(f"🔍 molecule_atom_lens期望原子数: {total_expected_atoms.tolist()}")
@@ -264,19 +264,7 @@ def align_input(af_in, seq):
     
     keep_indices = torch.tensor(keep_indices, dtype=torch.long)
     logger.debug(f"保留的原子数量: {len(keep_indices)}, 原始原子数量: {current_atom_idx}")
-    
-    # 🔍 验证keep_indices的合理性
-    if len(keep_indices) == 0:
-        logger.error("⚠️ keep_indices为空！这可能导致后续处理失败")
-    elif af_in.atom_pos is not None:
-        actual_atoms_in_af = af_in.atom_pos.shape[1]
-        max_keep_idx = keep_indices.max().item() if len(keep_indices) > 0 else -1
-        if max_keep_idx >= actual_atoms_in_af:
-            logger.error(f"⚠️ keep_indices最大值({max_keep_idx})超出实际原子数({actual_atoms_in_af})！")
-            # 裁切keep_indices到有效范围
-            keep_indices = keep_indices[keep_indices < actual_atoms_in_af]
-            logger.warning(f"🔧 已裁切keep_indices到有效范围，新长度: {len(keep_indices)}")
-    
+
     # 获取设备信息
     device = af_in.atom_inputs.device if af_in.atom_inputs is not None else torch.device('cpu')
     keep_indices = keep_indices.to(device)

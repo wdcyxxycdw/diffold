@@ -499,6 +499,11 @@ class DiffoldTrainer:
             if self.config.test_mode and batch_idx >= max_batches:
                 break
             
+            # 在测试模式下输出样本名称
+            if self.config.test_mode and self.local_rank == 0:
+                sample_names = batch.get('names', ['unknown'])
+                logger.info(f"🔍 当前训练样本: {sample_names}")
+            
             batch_start_time = time.time()
             
             try:
@@ -1135,8 +1140,8 @@ class DiffoldTrainer:
             dist.destroy_process_group()
 
 
-def run_small_scale_test(gpu_limit=None):
-    """运行小规模测试 - 包含多GPU环境测试"""
+def run_small_scale_test(fixed_sample_name=None):
+    """运行小规模测试 - 包含多GPU环境测试，可指定固定样本"""
     logger.info("🧪 启动多GPU环境小规模测试...")
     
     # 基础测试配置
@@ -1151,14 +1156,6 @@ def run_small_scale_test(gpu_limit=None):
     
     # 🔍 GPU环境检测和配置
     gpu_count = torch.cuda.device_count()
-    
-    # 应用GPU限制
-    if gpu_limit is not None and gpu_limit > 0:
-        gpu_count = min(gpu_count, gpu_limit)
-        if gpu_limit < torch.cuda.device_count():
-            import os
-            os.environ['CUDA_VISIBLE_DEVICES'] = ','.join(str(i) for i in range(gpu_limit))
-            logger.info(f"🎯 限制使用 {gpu_limit} 个GPU")
     
     logger.info(f"🖥️  将使用 {gpu_count} 个GPU进行测试")
     
@@ -1201,10 +1198,42 @@ def run_small_scale_test(gpu_limit=None):
     }
     
     try:
+        # ========== 新增：只用特定样本 ===========
+        fixed_train_loader = None
+        fixed_valid_loader = None
+        if fixed_sample_name is not None:
+            logger.info(f"🔒 仅使用指定样本进行测试: {fixed_sample_name}")
+            from diffold.dataloader import RNA3DDataset, collate_fn
+            dataset = RNA3DDataset(
+                data_dir=config.data_dir,
+                fold=0,
+                split="train",
+                max_length=config.max_sequence_length,
+                use_msa=config.use_msa,
+                cache_dir=None,
+                force_reload=False,
+                enable_missing_atom_mask=True
+            )
+            sample = dataset.get_sample_by_name(fixed_sample_name)
+            if sample is None:
+                raise RuntimeError(f"未找到指定样本: {fixed_sample_name}")
+            # 构造只包含该样本的 DataLoader
+            from torch.utils.data import DataLoader
+            fixed_dataset = [sample]
+            fixed_train_loader = DataLoader(fixed_dataset, batch_size=1, collate_fn=collate_fn)
+            fixed_valid_loader = fixed_train_loader  # 验证也用同一个
+            logger.info(f"✅ 已构造只包含样本 {fixed_sample_name} 的DataLoader")
+        # ========== 新增结束 ===========
 
         trainer = DiffoldTrainer(config)
         test_results['steps'].append('✅ 模型初始化成功')
         logger.info("✅ 模型初始化成功")
+        
+        # 如果指定了固定样本，替换trainer的数据加载器
+        if fixed_train_loader is not None:
+            trainer.train_loader = fixed_train_loader
+            trainer.valid_loader = fixed_valid_loader
+            logger.info(f"✅ 训练/验证均只用样本: {fixed_sample_name}")
         
         # 测试模型设备分布
         if hasattr(trainer.model, 'module'):
@@ -1312,15 +1341,15 @@ def main():
     
     # 其他参数
     parser.add_argument("--resume", type=str, default=None, help="从检查点恢复训练")
-    parser.add_argument("--test", action="store_true", help="运行多GPU环境小规模测试", default=True)
-    parser.add_argument("--test_gpu_count", type=int, default=None, help="限制测试使用的GPU数量")
+    parser.add_argument("--test", action="store_true", help="运行多GPU环境小规模测试")
+    parser.add_argument("--fixed_sample_name", type=str, default='4v8a_AB', help="指定用于测试的固定样本名称")
 
     
     args = parser.parse_args()
     
     # 如果是测试模式
     if args.test:
-        run_small_scale_test(gpu_limit=args.test_gpu_count)
+        run_small_scale_test(fixed_sample_name=args.fixed_sample_name)
         return
 
     # 创建配置
