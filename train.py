@@ -1547,6 +1547,13 @@ def main():
     
     logger = setup_logging(log_level)
     
+    # 打印初始配置信息
+    logger.info(f"📋 初始配置信息:")
+    logger.info(f"  输出目录: {config.output_dir}")
+    logger.info(f"  批次大小: {config.batch_size}")
+    logger.info(f"  学习率: {config.learning_rate}")
+    logger.info(f"  设备: {config.device}")
+    
     # 应用命令行参数到配置（只在明确指定时覆盖配置文件）
     if args.data_dir is not None:
         config.data_dir = args.data_dir
@@ -1656,29 +1663,43 @@ def main():
         config.torch_compile_mode = args.compile_mode
         logger.info(f"⚡ 计划启用 torch.compile (mode={config.torch_compile_mode})")
     
-    # 更新基础配置
-    config.data_dir = args.data_dir
-    config.batch_size = args.batch_size
-    config.max_sequence_length = args.max_length
-    config.num_workers = args.num_workers
-    config.fold = args.fold
-    config.use_all_folds = args.use_all_folds
+    # 更新基础配置（只在明确指定时覆盖）
+    if args.data_dir is not None:
+        config.data_dir = args.data_dir
+    if args.batch_size is not None:
+        config.batch_size = args.batch_size
+    if args.max_length is not None:
+        config.max_sequence_length = args.max_length
+    if args.num_workers is not None:
+        config.num_workers = args.num_workers
+    if args.fold is not None:
+        config.fold = args.fold
     
-    config.num_epochs = args.epochs
-    config.learning_rate = args.learning_rate
-    config.weight_decay = args.weight_decay
-    config.grad_clip_norm = args.grad_clip
+    if args.epochs is not None:
+        config.num_epochs = args.epochs
+    if args.learning_rate is not None:
+        config.learning_rate = args.learning_rate
+    if args.weight_decay is not None:
+        config.weight_decay = args.weight_decay
+    if args.grad_clip is not None:
+        config.grad_clip_norm = args.grad_clip
     
-    config.rhofold_checkpoint = args.rhofold_checkpoint
-    config.output_dir = args.output_dir
-    config.checkpoint_dir = args.checkpoint_dir
-    config.save_every = args.save_every
-    config.plot_every = args.plot_every
+    if args.rhofold_checkpoint is not None:
+        config.rhofold_checkpoint = args.rhofold_checkpoint
+    if args.output_dir is not None:
+        config.output_dir = args.output_dir
+    if args.checkpoint_dir is not None:
+        config.checkpoint_dir = args.checkpoint_dir
+    if args.save_every is not None:
+        config.save_every = args.save_every
+    if args.plot_every is not None:
+        config.plot_every = args.plot_every
     
-    if args.device == "auto":
-        config.device = "cuda" if torch.cuda.is_available() else "cpu"
-    else:
-        config.device = args.device
+    if args.device is not None:
+        if args.device == "auto":
+            config.device = "cuda" if torch.cuda.is_available() else "cpu"
+        else:
+            config.device = args.device
     
     config.mixed_precision = not args.no_mixed_precision
     config.use_data_parallel = not args.no_data_parallel
