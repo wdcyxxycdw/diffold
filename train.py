@@ -8,6 +8,7 @@ import argparse
 import json
 import logging
 import time
+import yaml
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, cast
@@ -25,15 +26,36 @@ from diffold.diffold import Diffold
 from diffold.dataloader import create_data_loaders
 
 # 设置日志
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),  # 控制台输出
-    ]
-)
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)  # 明确设置logger级别
+def setup_logging(log_level: str = "INFO"):
+    """设置全局日志配置"""
+    level_map = {
+        "DEBUG": logging.DEBUG,
+        "INFO": logging.INFO,
+        "WARNING": logging.WARNING,
+        "ERROR": logging.ERROR,
+        "CRITICAL": logging.CRITICAL
+    }
+    
+    log_level = log_level.upper()
+    if log_level not in level_map:
+        log_level = "INFO"
+    
+    logging.basicConfig(
+        level=level_map[log_level],
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.StreamHandler(),  # 控制台输出
+        ]
+    )
+    
+    # 设置所有模块的日志级别
+    for logger_name in logging.root.manager.loggerDict:
+        logging.getLogger(logger_name).setLevel(level_map[log_level])
+    
+    return logging.getLogger(__name__)
+
+# 默认设置
+logger = setup_logging()
 
 # 🔥 导入增强功能模块
 try:
@@ -48,7 +70,7 @@ except ImportError as e:
 class TrainingConfig:
     """训练配置类 - 兼容原版和增强版"""
     
-    def __init__(self):
+    def __init__(self, config_file: Optional[str] = None):
         # 基础数据配置
         self.data_dir = "./processed_data"
         self.batch_size = 8
@@ -64,7 +86,7 @@ class TrainingConfig:
         self.learning_rate = 1.2e-4
         self.weight_decay = 1e-5
         self.grad_clip_norm = 1.0
-        self.warmup_epochs = 3  # 修复: 减少预热轮数，针对100轮优化
+        self.warmup_steps = 1000  # 预热步数（基于step而不是epoch）
         
         # 调度器配置
         self.scheduler_type = "cosine"  # "cosine", "plateau", "warmup_cosine"
@@ -137,6 +159,13 @@ class TrainingConfig:
                 'reduce_batch_size_on_oom': True
             }
         }
+        
+        # 日志配置
+        self.log_level = "INFO"
+        
+        # 如果提供了配置文件，则加载配置
+        if config_file:
+            self.load_from_yaml(config_file)
     
     def apply_enhanced_preset(self, preset_name: str):
         """应用增强功能预设"""
@@ -178,26 +207,129 @@ class TrainingConfig:
             logger.info(f"✅ 应用预设: {preset_name}")
         else:
             logger.warning(f"未知预设: {preset_name}")
+    
+    def load_from_yaml(self, config_file: str):
+        """从YAML文件加载配置"""
+        config_path = Path(config_file)
+        if not config_path.exists():
+            raise FileNotFoundError(f"配置文件不存在: {config_file}")
+        
+        logger.info(f"📄 加载配置文件: {config_file}")
+        
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config_data = yaml.safe_load(f)
+        
+        # 加载数据配置
+        if 'data' in config_data:
+            data_config = config_data['data']
+            self.data_dir = data_config.get('data_dir', self.data_dir)
+            self.batch_size = data_config.get('batch_size', self.batch_size)
+            self.max_sequence_length = data_config.get('max_sequence_length', self.max_sequence_length)
+            self.num_workers = data_config.get('num_workers', self.num_workers)
+            self.use_msa = data_config.get('use_msa', self.use_msa)
+            self.fold = data_config.get('fold', self.fold)
+        
+        # 加载模型配置
+        if 'model' in config_data:
+            model_config = config_data['model']
+            self.rhofold_checkpoint = model_config.get('rhofold_checkpoint', self.rhofold_checkpoint)
+        
+        # 加载训练配置
+        if 'training' in config_data:
+            training_config = config_data['training']
+            self.num_epochs = training_config.get('num_epochs', self.num_epochs)
+            self.learning_rate = training_config.get('learning_rate', self.learning_rate)
+            self.weight_decay = training_config.get('weight_decay', self.weight_decay)
+            self.grad_clip_norm = training_config.get('grad_clip_norm', self.grad_clip_norm)
+            self.warmup_steps = training_config.get('warmup_steps', self.warmup_steps)
+            self.scheduler_type = training_config.get('scheduler_type', self.scheduler_type)
+            self.patience = training_config.get('patience', self.patience)
+            self.validate_every = training_config.get('validate_every', self.validate_every)
+            self.early_stopping_patience = training_config.get('early_stopping_patience', self.early_stopping_patience)
+        
+        # 加载输出配置
+        if 'output' in config_data:
+            output_config = config_data['output']
+            self.output_dir = output_config.get('output_dir', self.output_dir)
+            self.checkpoint_dir = output_config.get('checkpoint_dir', self.checkpoint_dir)
+            self.save_every = output_config.get('save_every', self.save_every)
+            self.keep_last_n_checkpoints = output_config.get('keep_last_n_checkpoints', self.keep_last_n_checkpoints)
+        
+        # 加载设备配置
+        if 'device' in config_data:
+            device_config = config_data['device']
+            device_str = device_config.get('device', 'auto')
+            if device_str == 'auto':
+                self.device = "cuda" if torch.cuda.is_available() else "cpu"
+            else:
+                self.device = device_str
+            self.mixed_precision = device_config.get('mixed_precision', self.mixed_precision)
+            self.use_torch_compile = device_config.get('use_torch_compile', self.use_torch_compile)
+            self.torch_compile_mode = device_config.get('torch_compile_mode', self.torch_compile_mode)
+        
+        # 加载多GPU配置
+        if 'multi_gpu' in config_data:
+            multi_gpu_config = config_data['multi_gpu']
+            self.use_data_parallel = multi_gpu_config.get('use_data_parallel', self.use_data_parallel)
+            self.gpu_ids = multi_gpu_config.get('gpu_ids', self.gpu_ids)
+        
+        # 加载交叉验证配置
+        if 'cross_validation' in config_data:
+            cv_config = config_data['cross_validation']
+            self.fold = cv_config.get('fold', self.fold)
+            self.num_folds = cv_config.get('num_folds', self.num_folds)
+            self.use_all_folds = cv_config.get('use_all_folds', self.use_all_folds)
+        
+        # 加载测试配置
+        if 'test' in config_data:
+            test_config = config_data['test']
+            self.test_mode = test_config.get('test_mode', self.test_mode)
+            self.test_samples = test_config.get('test_samples', self.test_samples)
+            self.test_epochs = test_config.get('test_epochs', self.test_epochs)
+        
+        # 加载日志配置
+        if 'logging' in config_data:
+            logging_config = config_data['logging']
+            self.log_level = logging_config.get('log_level', 'INFO')
+        
+        # 加载增强功能配置
+        if 'enhanced_features' in config_data:
+            enhanced_config = config_data['enhanced_features']
+            self.enhanced_features.update(enhanced_config)
+        
+        logger.info("✅ 配置文件加载完成")
 
 
 class TrainingMetrics:
     """训练指标记录类"""
     
     def __init__(self):
+        # 基于epoch的记录（向后兼容）
         self.train_losses = []
         self.valid_losses = []
         self.learning_rates = []
         self.epoch_times = []
+        
+        # 基于step的记录（新增）
+        self.step_losses = []
+        self.step_learning_rates = []
+        self.steps = []
         
         self.best_valid_loss = float('inf')
         self.best_epoch = 0
         self.early_stopping_counter = 0
     
     def update_train(self, loss: float, lr: float, epoch_time: float):
-        """更新训练指标"""
+        """更新训练指标（基于epoch）"""
         self.train_losses.append(loss)
         self.learning_rates.append(lr)
         self.epoch_times.append(epoch_time)
+    
+    def update_train_step(self, loss: float, lr: float, step: int):
+        """更新训练指标（基于step）"""
+        self.step_losses.append(loss)
+        self.step_learning_rates.append(lr)
+        self.steps.append(step)
     
     def update_valid(self, loss: float, epoch: int):
         """更新验证指标"""
@@ -219,6 +351,9 @@ class TrainingMetrics:
             'valid_losses': self.valid_losses,
             'learning_rates': self.learning_rates,
             'epoch_times': self.epoch_times,
+            'step_losses': self.step_losses,
+            'step_learning_rates': self.step_learning_rates,
+            'steps': self.steps,
             'best_valid_loss': self.best_valid_loss,
             'best_epoch': self.best_epoch,
             'early_stopping_counter': self.early_stopping_counter
@@ -425,7 +560,7 @@ class DiffoldTrainer:
                 weight_decay=self.config.weight_decay,
                 scheduler_config={
                     'type': self.config.enhanced_features['optimizer']['scheduler_type'],
-                    'warmup_epochs': self.config.warmup_epochs,
+                    'warmup_steps': self.config.warmup_steps,
                     'T_max': self.config.num_epochs,
                     'eta_min': 1e-6
                 },
@@ -515,11 +650,17 @@ class DiffoldTrainer:
                     
                     batch_time = time.time() - batch_start_time
                     
+                    # 计算当前step
+                    current_step = batch_idx + epoch * len(self.train_loader)
+                    
+                    # 记录基于step的训练指标
+                    self.metrics.update_train_step(loss.item(), self.optimizer.param_groups[0]['lr'], current_step)
+                    
                     # 🔥 记录监控数据
                     if (self.training_monitor and 
                         batch_idx % self.config.enhanced_features['monitoring']['monitoring_interval'] == 0):
                         self.training_monitor.log_training_step(
-                            step=batch_idx + epoch * len(self.train_loader),
+                            step=current_step,
                             epoch=epoch,
                             loss_value=loss.item(),
                             learning_rate=self.optimizer.param_groups[0]['lr'],
@@ -668,6 +809,12 @@ class DiffoldTrainer:
                 else:
                     torch.nn.utils.clip_grad_norm_(self.model.get_trainable_parameters(), self.config.grad_clip_norm)
                 self.optimizer.step()
+        
+        # 基于step的调度器更新
+        if (self.scheduler is not None and 
+            not self.enhanced_optimizer and 
+            self.config.scheduler_type in ["warmup_cosine", "warmup_cosine_restarts"]):
+            self.scheduler.step()
         
         return loss
     
@@ -856,6 +1003,10 @@ class DiffoldTrainer:
             self.metrics.valid_losses = metrics_dict.get('valid_losses', [])
             self.metrics.learning_rates = metrics_dict.get('learning_rates', [])
             self.metrics.epoch_times = metrics_dict.get('epoch_times', [])
+            # 恢复step-based指标
+            self.metrics.step_losses = metrics_dict.get('step_losses', [])
+            self.metrics.step_learning_rates = metrics_dict.get('step_learning_rates', [])
+            self.metrics.steps = metrics_dict.get('steps', [])
             self.metrics.best_valid_loss = metrics_dict.get('best_valid_loss', float('inf'))
             self.metrics.best_epoch = metrics_dict.get('best_epoch', 0)
             self.metrics.early_stopping_counter = metrics_dict.get('early_stopping_counter', 0)
@@ -866,41 +1017,69 @@ class DiffoldTrainer:
     
     def plot_training_curves(self):
         """绘制训练曲线"""
-        if not self.metrics.train_losses:
+        if not self.metrics.train_losses and not self.metrics.step_losses:
             return
         
         fig, axes = plt.subplots(2, 2, figsize=(15, 10))
         
-        # 损失曲线
-        epochs = range(1, len(self.metrics.train_losses) + 1)
-        axes[0, 0].plot(epochs, self.metrics.train_losses, 'b-', label='Training Loss')
-        if self.metrics.valid_losses:
-            valid_epochs = range(1, len(self.metrics.valid_losses) + 1)
-            axes[0, 0].plot(valid_epochs, self.metrics.valid_losses, 'r-', label='Validation Loss')
-        axes[0, 0].set_xlabel('Epoch')
-        axes[0, 0].set_ylabel('Loss')
-        axes[0, 0].set_title('Training and Validation Loss')
-        axes[0, 0].legend()
-        axes[0, 0].grid(True)
+        # 损失曲线 - 基于step
+        if self.metrics.step_losses:
+            axes[0, 0].plot(self.metrics.steps, self.metrics.step_losses, 'b-', label='Training Loss (Step)', alpha=0.7)
+            axes[0, 0].set_xlabel('Step')
+            axes[0, 0].set_ylabel('Loss')
+            axes[0, 0].set_title('Training Loss (Step-based)')
+            axes[0, 0].legend()
+            axes[0, 0].grid(True)
+        else:
+            # 回退到基于epoch的绘图
+            epochs = range(1, len(self.metrics.train_losses) + 1)
+            axes[0, 0].plot(epochs, self.metrics.train_losses, 'b-', label='Training Loss')
+            if self.metrics.valid_losses:
+                valid_epochs = range(1, len(self.metrics.valid_losses) + 1)
+                axes[0, 0].plot(valid_epochs, self.metrics.valid_losses, 'r-', label='Validation Loss')
+            axes[0, 0].set_xlabel('Epoch')
+            axes[0, 0].set_ylabel('Loss')
+            axes[0, 0].set_title('Training and Validation Loss')
+            axes[0, 0].legend()
+            axes[0, 0].grid(True)
         
-        # 学习率曲线
-        if self.metrics.learning_rates:
-            axes[0, 1].plot(epochs, self.metrics.learning_rates, 'g-')
-            axes[0, 1].set_xlabel('Epoch')
+        # 学习率曲线 - 基于step
+        if self.metrics.step_learning_rates:
+            axes[0, 1].plot(self.metrics.steps, self.metrics.step_learning_rates, 'g-')
+            axes[0, 1].set_xlabel('Step')
             axes[0, 1].set_ylabel('Learning Rate')
-            axes[0, 1].set_title('Learning Rate Schedule')
+            axes[0, 1].set_title('Learning Rate Schedule (Step-based)')
             axes[0, 1].grid(True)
+        else:
+            # 回退到基于epoch的绘图
+            if self.metrics.learning_rates:
+                epochs = range(1, len(self.metrics.learning_rates) + 1)
+                axes[0, 1].plot(epochs, self.metrics.learning_rates, 'g-')
+                axes[0, 1].set_xlabel('Epoch')
+                axes[0, 1].set_ylabel('Learning Rate')
+                axes[0, 1].set_title('Learning Rate Schedule')
+                axes[0, 1].grid(True)
         
-        # 训练时间
+        # 训练时间（基于epoch）
         if self.metrics.epoch_times:
+            epochs = range(1, len(self.metrics.epoch_times) + 1)
             axes[1, 0].plot(epochs, self.metrics.epoch_times, 'orange')
             axes[1, 0].set_xlabel('Epoch')
             axes[1, 0].set_ylabel('Time (seconds)')
             axes[1, 0].set_title('Epoch Training Time')
             axes[1, 0].grid(True)
         
-        # 损失分布（最近10个epoch）
-        if len(self.metrics.train_losses) > 1:
+        # 损失分布（基于step或epoch）
+        if self.metrics.step_losses and len(self.metrics.step_losses) > 1:
+            # 基于step的损失分布
+            recent_losses = self.metrics.step_losses[-100:]  # 最近100个step
+            axes[1, 1].hist(recent_losses, bins=min(20, len(recent_losses)), alpha=0.7, color='blue')
+            axes[1, 1].set_xlabel('Loss')
+            axes[1, 1].set_ylabel('Frequency')
+            axes[1, 1].set_title('Recent Training Loss Distribution (Step-based)')
+            axes[1, 1].grid(True)
+        elif len(self.metrics.train_losses) > 1:
+            # 回退到基于epoch的损失分布
             recent_losses = self.metrics.train_losses[-10:]
             axes[1, 1].hist(recent_losses, bins=min(10, len(recent_losses)), alpha=0.7, color='blue')
             axes[1, 1].set_xlabel('Loss')
@@ -911,7 +1090,7 @@ class DiffoldTrainer:
         plt.tight_layout()
         
         # 保存图像
-        plot_path = self.config.output_dir / "plots" / f"training_curves_epoch_{len(self.metrics.train_losses)}.png"
+        plot_path = self.config.output_dir / "plots" / f"training_curves_step_{len(self.metrics.steps) if self.metrics.steps else len(self.metrics.train_losses)}.png"
         plt.savefig(plot_path, dpi=300, bbox_inches='tight')
         plt.close()
         
@@ -964,12 +1143,13 @@ class DiffoldTrainer:
                 # 使用增强优化器
                 self.enhanced_optimizer.scheduler_step(valid_loss)
             else:
-                # 使用原版调度器
+                # 使用原版调度器（基于epoch的调度器）
                 if self.scheduler is not None:
                     if self.config.scheduler_type == "plateau" and valid_loss is not None:
                         self.scheduler.step(valid_loss)
                     elif self.config.scheduler_type == "cosine":
                         self.scheduler.step()
+                    # 注意：基于step的调度器（warmup_cosine, warmup_cosine_restarts）已在train_step中处理
             
             # 记录指标
             current_lr = self.optimizer.param_groups[0]['lr']
@@ -1147,7 +1327,7 @@ def run_small_scale_test(fixed_sample_name=None):
     # 基础测试配置
     config = TrainingConfig()
     config.test_mode = True
-    config.test_epochs = 1  # 测试2轮，验证完整流程
+    config.test_epochs = 2  # 测试2轮，验证完整流程
     config.test_samples = 1  # 稍微增加样本数测试批次处理
     config.max_sequence_length = 20
     config.num_workers = 2   # 测试数据加载
@@ -1174,7 +1354,7 @@ def run_small_scale_test(fixed_sample_name=None):
     else:
         logger.info(f"🚀 多GPU模式测试 ({gpu_count} GPUs)")
         config.device = "cuda"
-        config.batch_size = 2 
+        config.batch_size = 1
         config.mixed_precision = True
         config.use_data_parallel = True
         
@@ -1339,21 +1519,34 @@ def main():
     parser.add_argument("--grad_accum", type=int, default=None,
                        help="梯度累积步数 (gradient_accumulation_steps)，默认根据预设或1")
     
+    # 配置文件参数
+    parser.add_argument("--config", type=str, default='./config.yaml', help="配置文件路径")
+    
+    # 日志参数
+    parser.add_argument("--log_level", type=str, default="INFO",
+                       choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+                       help="日志级别 (默认: INFO)")
+    
     # 其他参数
     parser.add_argument("--resume", type=str, default=None, help="从检查点恢复训练")
     parser.add_argument("--test", action="store_true", help="运行多GPU环境小规模测试")
-    parser.add_argument("--fixed_sample_name", type=str, default='4v8a_AB', help="指定用于测试的固定样本名称")
+    parser.add_argument("--fixed_sample_name", type=str, default=None, help="指定用于测试的固定样本名称")
 
     
     args = parser.parse_args()
+    
+    # 创建配置（从配置文件或使用默认值）
+    config = TrainingConfig(args.config)
+    
+    # 重新设置日志级别（优先使用命令行参数，其次使用配置文件）
+    log_level = args.log_level if args.log_level else config.log_level
+    logger = setup_logging(log_level)
+    logger.info(f"设置日志级别: {log_level}")
     
     # 如果是测试模式
     if args.test:
         run_small_scale_test(fixed_sample_name=args.fixed_sample_name)
         return
-
-    # 创建配置
-    config = TrainingConfig()
     
     # 🔥 应用增强功能设置
     if args.disable_enhanced or not ENHANCED_FEATURES_AVAILABLE:

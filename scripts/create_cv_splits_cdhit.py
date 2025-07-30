@@ -42,7 +42,6 @@ class CDHitCVSplitter:
         
         # 创建输出目录
         self.output_dir.mkdir(exist_ok=True)
-        (self.output_dir / "cv_splits").mkdir(exist_ok=True)
         (self.output_dir / "clusters").mkdir(exist_ok=True)
         
         # 检查cd-hit是否可用
@@ -229,7 +228,7 @@ class CDHitCVSplitter:
     def save_splits(self, splits: List[Tuple[List[str], List[str]]], 
                    clusters: Dict[str, List[str]]) -> None:
         """
-        保存划分结果
+        保存划分结果（参考processed_data/list格式）
         
         Args:
             splits: 划分结果
@@ -237,12 +236,11 @@ class CDHitCVSplitter:
         """
         logger.info("保存划分结果...")
         
-        cv_dir = self.output_dir / "cv_splits"
+        # 创建list目录（参考processed_data/list格式）
+        list_dir = self.output_dir / "list"
+        list_dir.mkdir(exist_ok=True)
         
         for fold, (train_clusters, val_clusters) in enumerate(splits):
-            fold_dir = cv_dir / f"fold_{fold + 1}"
-            fold_dir.mkdir(exist_ok=True)
-            
             # 获取训练集和验证集的序列ID
             train_sequences = []
             val_sequences = []
@@ -253,29 +251,22 @@ class CDHitCVSplitter:
             for cluster_id in val_clusters:
                 val_sequences.extend(clusters[cluster_id])
             
-            # 保存训练集
-            with open(fold_dir / "train.txt", 'w') as f:
+            # 保存训练集（格式：fold-{fold}_train_ids）
+            train_file = list_dir / f"fold-{fold}_train_ids"
+            with open(train_file, 'w') as f:
                 for seq_id in train_sequences:
                     f.write(f"{seq_id}\n")
             
-            # 保存验证集
-            with open(fold_dir / "val.txt", 'w') as f:
+            # 保存验证集（格式：valid_fold-{fold}）
+            val_file = list_dir / f"valid_fold-{fold}"
+            with open(val_file, 'w') as f:
                 for seq_id in val_sequences:
                     f.write(f"{seq_id}\n")
             
-            # 保存聚类信息
-            with open(fold_dir / "train_clusters.txt", 'w') as f:
-                for cluster_id in train_clusters:
-                    f.write(f"{cluster_id}\n")
-            
-            with open(fold_dir / "val_clusters.txt", 'w') as f:
-                for cluster_id in val_clusters:
-                    f.write(f"{cluster_id}\n")
-            
-            logger.info(f"  折 {fold + 1}: 训练集 {len(train_sequences)} 序列, 验证集 {len(val_sequences)} 序列")
+            logger.info(f"  折 {fold}: 训练集 {len(train_sequences)} 序列, 验证集 {len(val_sequences)} 序列")
         
         # 保存总体统计信息
-        stats_file = cv_dir / "cv_stats.txt"
+        stats_file = self.output_dir / "cv_stats.txt"
         with open(stats_file, 'w') as f:
             f.write(f"CD-hit聚类交叉验证统计\n")
             f.write(f"相似度阈值: {self.cdhit_threshold}\n")
@@ -286,11 +277,12 @@ class CDHitCVSplitter:
             for fold, (train_clusters, val_clusters) in enumerate(splits):
                 train_sequences = sum(len(clusters[c]) for c in train_clusters)
                 val_sequences = sum(len(clusters[c]) for c in val_clusters)
-                f.write(f"折 {fold + 1}:\n")
+                f.write(f"折 {fold}:\n")
                 f.write(f"  训练集: {len(train_clusters)} 聚类, {train_sequences} 序列\n")
                 f.write(f"  验证集: {len(val_clusters)} 聚类, {val_sequences} 序列\n\n")
         
-        logger.info(f"✓ 划分结果已保存到 {cv_dir}")
+        logger.info(f"✓ 划分结果已保存到 {list_dir}")
+        logger.info(f"✓ 统计信息已保存到 {stats_file}")
     
     def run(self, n_folds: int = 10):
         """
@@ -334,8 +326,8 @@ def main():
                        help="cd-hit相似度阈值 (默认: 0.8)")
     parser.add_argument("--folds", type=int, default=10, 
                        help="交叉验证折数 (默认: 10)")
-    parser.add_argument("--seed", type=int, default=42, 
-                       help="随机种子 (默认: 42)")
+    parser.add_argument("--seed", type=int, default=412907, 
+                       help="随机种子")
     
     args = parser.parse_args()
     

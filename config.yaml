@@ -1,0 +1,105 @@
+# Diffold 训练配置文件示例
+
+# 数据配置
+data:
+  data_dir: "./processed_data"
+  batch_size: 1
+  max_sequence_length: 256
+  num_workers: 4
+  use_msa: true
+  fold: 0  # 交叉验证折数 (0-9)
+
+# 模型配置
+model:
+  rhofold_checkpoint: "./pretrained/model_20221010_params.pt"
+
+# 训练配置
+training:
+  num_epochs: 100
+  learning_rate: 0.0003
+  weight_decay: 0.00001
+  grad_clip_norm: 1.0
+  warmup_steps: 1000  # 预热步数（基于step而不是epoch）
+  
+  # 调度器配置
+  scheduler_type: "cosine"  # "cosine", "plateau"
+  patience: 10
+  
+  # 验证配置
+  validate_every: 1
+  early_stopping_patience: 20
+
+# 输出配置
+output:
+  output_dir: "./output"
+  checkpoint_dir: "./checkpoints"
+  save_every: 1
+  keep_last_n_checkpoints: 10
+
+# 设备配置
+device:
+  device: "auto"  # "auto", "cpu", "cuda"
+  mixed_precision: true
+  use_torch_compile: false
+  torch_compile_mode: "default"  # "default", "reduce-overhead", "max-autotune"
+
+# 多GPU配置
+multi_gpu:
+  use_data_parallel: true
+  gpu_ids: null  # 指定GPU ID列表，如 [0, 1, 2]
+
+# 交叉验证配置
+cross_validation:
+  fold: 0  # 当前使用的折数 (0-9)
+  num_folds: 10
+  use_all_folds: false
+
+# 日志配置
+logging:
+  log_level: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+
+# 测试配置
+test:
+  test_mode: false
+  test_samples: 10
+  test_epochs: 5
+
+# 🔥 增强功能配置
+enhanced_features:
+  enable_enhanced_training: true  # 总开关
+  
+  # 监控配置
+  monitoring:
+    enable_performance_monitoring: true
+    enable_memory_monitoring: true
+    enable_health_checking: true
+    monitoring_interval: 1
+    save_monitoring_plots: true
+    memory_cleanup_threshold: 0.85
+  
+  # 优化器配置
+  optimizer:
+    use_advanced_optimizer: true
+    optimizer_name: "adamw"  # "adamw", "adam", "sgd", "lion"
+    gradient_accumulation_steps: 2
+    scheduler_type: "warmup_cosine"  # "warmup_cosine", "warmup_cosine_restarts", "plateau"
+  
+  # 数据加载器配置
+  dataloader:
+    enable_prefetch: true
+    prefetch_factor: 2
+    cache_size: 100
+    pin_memory: true
+    persistent_workers: true
+  
+  # 评估配置
+  evaluation:
+    compute_structure_metrics: true
+    compute_confidence_metrics: true
+    save_predictions: false
+  
+  # 错误恢复配置
+  error_recovery:
+    auto_retry_on_oom: true
+    max_retry_attempts: 3
+    reduce_batch_size_on_oom: true 
