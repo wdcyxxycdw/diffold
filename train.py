@@ -1468,32 +1468,31 @@ def main():
     parser = argparse.ArgumentParser(description="Diffold模型训练 - 增强版")
     
     # 数据参数
-    parser.add_argument("--data_dir", type=str, default="./processed_data", help="数据目录")
-    parser.add_argument("--batch_size", type=int, default=1, help="批次大小")
-    parser.add_argument("--max_length", type=int, default=256, help="最大序列长度")
-    parser.add_argument("--num_workers", type=int, default=4, help="数据加载进程数")
-    parser.add_argument("--fold", type=int, default=0, help="交叉验证折数 (0-9)")
+    parser.add_argument("--data_dir", type=str, default=None, help="数据目录 (默认使用配置文件中的设置)")
+    parser.add_argument("--batch_size", type=int, default=None, help="批次大小 (默认使用配置文件中的设置)")
+    parser.add_argument("--max_length", type=int, default=None, help="最大序列长度 (默认使用配置文件中的设置)")
+    parser.add_argument("--num_workers", type=int, default=None, help="数据加载进程数 (默认使用配置文件中的设置)")
+    parser.add_argument("--fold", type=int, default=None, help="交叉验证折数 (0-9) (默认使用配置文件中的设置)")
     parser.add_argument("--use_all_folds", action="store_true", help="使用所有折数的数据进行训练")
     
     # 训练参数
-    parser.add_argument("--epochs", type=int, default=100, help="训练轮数")
-    parser.add_argument("--learning_rate", type=float, default=1e-4, help="学习率")
-    parser.add_argument("--weight_decay", type=float, default=1e-5, help="权重衰减")
-    parser.add_argument("--grad_clip", type=float, default=1.0, help="梯度裁剪阈值")
+    parser.add_argument("--epochs", type=int, default=None, help="训练轮数 (默认使用配置文件中的设置)")
+    parser.add_argument("--learning_rate", type=float, default=None, help="学习率 (默认使用配置文件中的设置)")
+    parser.add_argument("--weight_decay", type=float, default=None, help="权重衰减 (默认使用配置文件中的设置)")
+    parser.add_argument("--grad_clip", type=float, default=None, help="梯度裁剪阈值 (默认使用配置文件中的设置)")
     
     # 模型参数
-    parser.add_argument("--rhofold_checkpoint", type=str, 
-                       default="./pretrained/model_20221010_params.pt", 
-                       help="RhoFold预训练权重路径")
+    parser.add_argument("--rhofold_checkpoint", type=str, default=None,
+                       help="RhoFold预训练权重路径 (默认使用配置文件中的设置)")
     
     # 输出参数
-    parser.add_argument("--output_dir", type=str, default="./output", help="输出目录")
-    parser.add_argument("--checkpoint_dir", type=str, default="./checkpoints", help="检查点目录")
-    parser.add_argument("--save_every", type=int, default=1, help="每N轮保存检查点")
-    parser.add_argument("--plot_every", type=int, default=1, help="每N轮保存训练曲线")
+    parser.add_argument("--output_dir", type=str, default=None, help="输出目录 (默认使用配置文件中的设置)")
+    parser.add_argument("--checkpoint_dir", type=str, default=None, help="检查点目录 (默认使用配置文件中的设置)")
+    parser.add_argument("--save_every", type=int, default=None, help="每N轮保存检查点 (默认使用配置文件中的设置)")
+    parser.add_argument("--plot_every", type=int, default=None, help="每N轮保存训练曲线 (默认使用配置文件中的设置)")
     
     # 设备参数
-    parser.add_argument("--device", type=str, default="auto", help="设备 (auto/cpu/cuda)")
+    parser.add_argument("--device", type=str, default=None, help="设备 (auto/cpu/cuda) (默认使用配置文件中的设置)")
     parser.add_argument("--no_mixed_precision", action="store_true", help="禁用混合精度训练")
     parser.add_argument("--no_data_parallel", action="store_true", help="禁用DataParallel多GPU训练")
     parser.add_argument("--gpu_ids", type=int, nargs='+', help="指定使用的GPU ID")
@@ -1523,9 +1522,9 @@ def main():
     parser.add_argument("--config", type=str, default='./config.yaml', help="配置文件路径")
     
     # 日志参数
-    parser.add_argument("--log_level", type=str, default="INFO",
+    parser.add_argument("--log_level", type=str, default=None,
                        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-                       help="日志级别 (默认: INFO)")
+                       help="日志级别 (默认使用配置文件中的设置)")
     
     # 其他参数
     parser.add_argument("--resume", type=str, default=None, help="从检查点恢复训练")
@@ -1538,10 +1537,89 @@ def main():
     # 创建配置（从配置文件或使用默认值）
     config = TrainingConfig(args.config)
     
-    # 重新设置日志级别（优先使用命令行参数，其次使用配置文件）
-    log_level = args.log_level if args.log_level else config.log_level
+    # 重新设置日志级别（配置文件优先级更高，只有明确指定命令行参数时才覆盖）
+    if args.log_level is not None:
+        log_level = args.log_level
+        logger.info(f"使用命令行指定的日志级别: {log_level}")
+    else:
+        log_level = config.log_level
+        logger.info(f"使用配置文件中的日志级别: {log_level}")
+    
     logger = setup_logging(log_level)
-    logger.info(f"设置日志级别: {log_level}")
+    
+    # 应用命令行参数到配置（只在明确指定时覆盖配置文件）
+    if args.data_dir is not None:
+        config.data_dir = args.data_dir
+        logger.info(f"使用命令行指定的数据目录: {args.data_dir}")
+    
+    if args.batch_size is not None:
+        config.batch_size = args.batch_size
+        logger.info(f"使用命令行指定的批次大小: {args.batch_size}")
+    
+    if args.max_length is not None:
+        config.max_sequence_length = args.max_length
+        logger.info(f"使用命令行指定的最大序列长度: {args.max_length}")
+    
+    if args.num_workers is not None:
+        config.num_workers = args.num_workers
+        logger.info(f"使用命令行指定的数据加载进程数: {args.num_workers}")
+    
+    if args.fold is not None:
+        config.fold = args.fold
+        logger.info(f"使用命令行指定的交叉验证折数: {args.fold}")
+    
+    if args.epochs is not None:
+        config.num_epochs = args.epochs
+        logger.info(f"使用命令行指定的训练轮数: {args.epochs}")
+    
+    if args.learning_rate is not None:
+        config.learning_rate = args.learning_rate
+        logger.info(f"使用命令行指定的学习率: {args.learning_rate}")
+    
+    if args.weight_decay is not None:
+        config.weight_decay = args.weight_decay
+        logger.info(f"使用命令行指定的权重衰减: {args.weight_decay}")
+    
+    if args.grad_clip is not None:
+        config.grad_clip_norm = args.grad_clip
+        logger.info(f"使用命令行指定的梯度裁剪阈值: {args.grad_clip}")
+    
+    if args.rhofold_checkpoint is not None:
+        config.rhofold_checkpoint = args.rhofold_checkpoint
+        logger.info(f"使用命令行指定的模型路径: {args.rhofold_checkpoint}")
+    
+    if args.output_dir is not None:
+        config.output_dir = args.output_dir
+        logger.info(f"使用命令行指定的输出目录: {args.output_dir}")
+    
+    if args.checkpoint_dir is not None:
+        config.checkpoint_dir = args.checkpoint_dir
+        logger.info(f"使用命令行指定的检查点目录: {args.checkpoint_dir}")
+    
+    if args.save_every is not None:
+        config.save_every = args.save_every
+        logger.info(f"使用命令行指定的保存频率: {args.save_every}")
+    
+    if args.plot_every is not None:
+        config.plot_every = args.plot_every
+        logger.info(f"使用命令行指定的绘图频率: {args.plot_every}")
+    
+    if args.device is not None:
+        config.device = args.device
+        logger.info(f"使用命令行指定的设备: {args.device}")
+    
+    # 处理布尔参数
+    if args.no_mixed_precision:
+        config.mixed_precision = False
+        logger.info("禁用混合精度训练")
+    
+    if args.no_data_parallel:
+        config.use_data_parallel = False
+        logger.info("禁用数据并行")
+    
+    if args.use_all_folds:
+        config.use_all_folds = True
+        logger.info("使用所有折数的数据进行训练")
     
     # 如果是测试模式
     if args.test:
