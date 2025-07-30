@@ -62,8 +62,9 @@ class WarmupLRScheduler(_LRScheduler):
         else:
             # 预热结束后使用基础调度器
             if self.base_scheduler is not None:
-                # 调整基础调度器的epoch
-                self.base_scheduler.last_epoch = self.last_epoch - self.warmup_steps
+                # 调整基础调度器的步数（从0开始）
+                effective_step = self.last_epoch - self.warmup_steps
+                self.base_scheduler.last_epoch = effective_step
                 return self.base_scheduler.get_lr()
             else:
                 return self.base_lrs
@@ -233,14 +234,19 @@ class AdaptiveOptimizer:
         scheduler_type = config.get('type', 'cosine')
         
         if scheduler_type == 'warmup_cosine':
+            # 计算预热后的总步数
+            total_steps = config.get('T_max', 100)
+            warmup_steps = config.get('warmup_steps', 100)
+            remaining_steps = total_steps - warmup_steps
+            
             base_scheduler = optim.lr_scheduler.CosineAnnealingLR(
                 self.optimizer,
-                T_max=config.get('T_max', 100),
+                T_max=remaining_steps,  # 预热后的剩余步数
                 eta_min=config.get('eta_min', 1e-6)
             )
             return WarmupLRScheduler(
                 self.optimizer,
-                warmup_steps=config.get('warmup_steps', 1000),
+                warmup_steps=warmup_steps,
                 base_scheduler=base_scheduler,
                 warmup_start_lr=config.get('warmup_start_lr', 1e-7)
             )
@@ -251,8 +257,8 @@ class AdaptiveOptimizer:
                 T_0=config.get('T_0', 50),
                 T_mult=config.get('T_mult', 2),
                 eta_min=config.get('eta_min', 1e-6),
-                warmup_steps=config.get('warmup_steps', 1000),
-                warmup_start_lr=config.get('warmup_start_lr', 1e-7)
+                warmup_steps=config.get('warmup_steps', 100),
+                warmup_start_lr=config.get('warmup_start_lr', 1e-6)
             )
         
         elif scheduler_type == 'plateau':

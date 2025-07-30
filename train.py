@@ -552,6 +552,16 @@ class DiffoldTrainer:
             self.config.enhanced_features['optimizer']['use_advanced_optimizer']):
             logger.info("🎯 使用高级优化器")
             
+            # 使用真实数据计算总步数
+            steps_per_epoch = len(self.train_loader)
+            total_steps = self.config.num_epochs * steps_per_epoch
+            
+            if self.is_main_process:
+                logger.info(f"📊 使用真实数据配置调度器:")
+                logger.info(f"  每epoch步数: {steps_per_epoch}")
+                logger.info(f"  总训练步数: {total_steps}")
+                logger.info(f"  预热步数: {self.config.warmup_steps}")
+            
             self.enhanced_optimizer = AdaptiveOptimizer(  # type: ignore[arg-type]
                 model=cast(nn.Module, self.model),
                 optimizer_name=self.config.enhanced_features['optimizer']['optimizer_name'],
@@ -560,7 +570,7 @@ class DiffoldTrainer:
                 scheduler_config={
                     'type': self.config.enhanced_features['optimizer']['scheduler_type'],
                     'warmup_steps': self.config.warmup_steps,
-                    'T_max': self.config.num_epochs,
+                    'T_max': total_steps,  # 使用真实总步数
                     'eta_min': 1e-6
                 },
                 gradient_accumulation_steps=self.config.enhanced_features['optimizer']['gradient_accumulation_steps'],
@@ -597,6 +607,8 @@ class DiffoldTrainer:
                 self.scheduler = None
         
         logger.info("优化器和调度器设置完成")
+    
+
     
     def train_one_epoch(self, epoch: int) -> float:
         """训练一个epoch"""
