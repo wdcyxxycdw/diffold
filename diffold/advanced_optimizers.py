@@ -315,6 +315,13 @@ class AdaptiveOptimizer:
         self.optimizer.step()
         self.stats['update_count'] += 1
         
+        # 调度器步骤（对于step-based调度器）
+        if self.scheduler is not None:
+            # 对于step-based调度器，在每个优化器步骤后调用
+            if isinstance(self.scheduler, (WarmupLRScheduler, CosineAnnealingWarmRestarts)):
+                self.scheduler.step()
+            # 对于epoch-based调度器（如ReduceLROnPlateau），不在这里调用
+        
         # 记录学习率
         current_lr = self.optimizer.param_groups[0]['lr']
         self.stats['lr_history'].append(current_lr)
