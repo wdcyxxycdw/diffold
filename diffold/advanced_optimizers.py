@@ -25,7 +25,7 @@ class WarmupLRScheduler(_LRScheduler):
     
     def __init__(self, 
                  optimizer: optim.Optimizer,
-                 warmup_epochs: int,
+                 warmup_steps: int,
                  base_scheduler: _LRScheduler = None,
                  warmup_start_lr: float = 1e-7,
                  last_epoch: int = -1,
@@ -33,13 +33,13 @@ class WarmupLRScheduler(_LRScheduler):
         """
         Args:
             optimizer: 优化器
-            warmup_epochs: 预热轮数
+            warmup_steps: 预热步数
             base_scheduler: 预热后使用的基础调度器
             warmup_start_lr: 预热起始学习率
             last_epoch: 上次epoch索引
             verbose: 是否详细输出
         """
-        self.warmup_epochs = warmup_epochs
+        self.warmup_steps = warmup_steps
         self.base_scheduler = base_scheduler
         self.warmup_start_lr = warmup_start_lr
         
@@ -54,16 +54,16 @@ class WarmupLRScheduler(_LRScheduler):
             super().__init__(optimizer, last_epoch)
     
     def get_lr(self):
-        if self.last_epoch < self.warmup_epochs:
+        if self.last_epoch < self.warmup_steps:
             # 预热阶段：线性增长 - 修复: 使用 (last_epoch + 1) 确保达到目标学习率
-            progress = (self.last_epoch + 1) / self.warmup_epochs
+            progress = (self.last_epoch + 1) / self.warmup_steps
             return [self.warmup_start_lr + (base_lr - self.warmup_start_lr) * progress
                     for base_lr in self.base_lrs]
         else:
             # 预热结束后使用基础调度器
             if self.base_scheduler is not None:
                 # 调整基础调度器的epoch
-                self.base_scheduler.last_epoch = self.last_epoch - self.warmup_epochs
+                self.base_scheduler.last_epoch = self.last_epoch - self.warmup_steps
                 return self.base_scheduler.get_lr()
             else:
                 return self.base_lrs
@@ -73,7 +73,7 @@ class WarmupLRScheduler(_LRScheduler):
         
         # 如果有基础调度器且过了预热期，同步更新
         if (self.base_scheduler is not None and 
-            self.last_epoch >= self.warmup_epochs):
+            self.last_epoch >= self.warmup_steps):
             self.base_scheduler.step()
 
 
@@ -85,7 +85,7 @@ class CosineAnnealingWarmRestarts(_LRScheduler):
                  T_0: int,
                  T_mult: int = 1,
                  eta_min: float = 0,
-                 warmup_epochs: int = 0,
+                 warmup_steps: int = 0,
                  warmup_start_lr: float = 1e-7,
                  last_epoch: int = -1):
         """
@@ -93,13 +93,13 @@ class CosineAnnealingWarmRestarts(_LRScheduler):
             T_0: 第一次重启前的epoch数
             T_mult: 重启后周期的乘数
             eta_min: 最小学习率
-            warmup_epochs: 每次重启后的预热轮数
+            warmup_steps: 每次重启后的预热步数
             warmup_start_lr: 预热起始学习率
         """
         self.T_0 = T_0
         self.T_mult = T_mult
         self.eta_min = eta_min
-        self.warmup_epochs = warmup_epochs
+        self.warmup_steps = warmup_steps
         self.warmup_start_lr = warmup_start_lr
         
         # 跟踪当前周期
@@ -110,15 +110,15 @@ class CosineAnnealingWarmRestarts(_LRScheduler):
         super().__init__(optimizer, last_epoch)
     
     def get_lr(self):
-        if self.T_cur < self.warmup_epochs:
+        if self.T_cur < self.warmup_steps:
             # 预热阶段 - 修复: 使用 (T_cur + 1) 确保达到目标学习率
-            progress = (self.T_cur + 1) / self.warmup_epochs
+            progress = (self.T_cur + 1) / self.warmup_steps
             return [self.warmup_start_lr + (base_lr - self.warmup_start_lr) * progress
                     for base_lr in self.base_lrs]
         else:
             # 余弦退火阶段
-            effective_t = self.T_cur - self.warmup_epochs
-            effective_T_i = self.T_i - self.warmup_epochs
+            effective_t = self.T_cur - self.warmup_steps
+            effective_T_i = self.T_i - self.warmup_steps
             
             return [self.eta_min + (base_lr - self.eta_min) * 
                     (1 + math.cos(math.pi * effective_t / effective_T_i)) / 2
@@ -240,7 +240,7 @@ class AdaptiveOptimizer:
             )
             return WarmupLRScheduler(
                 self.optimizer,
-                warmup_epochs=config.get('warmup_epochs', 5),
+                warmup_steps=config.get('warmup_steps', 1000),
                 base_scheduler=base_scheduler,
                 warmup_start_lr=config.get('warmup_start_lr', 1e-7)
             )
@@ -251,7 +251,7 @@ class AdaptiveOptimizer:
                 T_0=config.get('T_0', 50),
                 T_mult=config.get('T_mult', 2),
                 eta_min=config.get('eta_min', 1e-6),
-                warmup_epochs=config.get('warmup_epochs', 5),
+                warmup_steps=config.get('warmup_steps', 1000),
                 warmup_start_lr=config.get('warmup_start_lr', 1e-7)
             )
         

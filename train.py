@@ -64,7 +64,7 @@ class TrainingConfig:
         self.learning_rate = 1.2e-4
         self.weight_decay = 1e-5
         self.grad_clip_norm = 1.0
-        self.warmup_epochs = 3  # 修复: 减少预热轮数，针对100轮优化
+        self.warmup_steps = 1000  # 预热步数（基于step而不是epoch）
         
         # 调度器配置
         self.scheduler_type = "cosine"  # "cosine", "plateau", "warmup_cosine"
@@ -184,20 +184,32 @@ class TrainingMetrics:
     """训练指标记录类"""
     
     def __init__(self):
+        # 基于epoch的记录（向后兼容）
         self.train_losses = []
         self.valid_losses = []
         self.learning_rates = []
         self.epoch_times = []
+        
+        # 基于step的记录（新增）
+        self.step_losses = []
+        self.step_learning_rates = []
+        self.steps = []
         
         self.best_valid_loss = float('inf')
         self.best_epoch = 0
         self.early_stopping_counter = 0
     
     def update_train(self, loss: float, lr: float, epoch_time: float):
-        """更新训练指标"""
+        """更新训练指标（基于epoch）"""
         self.train_losses.append(loss)
         self.learning_rates.append(lr)
         self.epoch_times.append(epoch_time)
+    
+    def update_train_step(self, loss: float, lr: float, step: int):
+        """更新训练指标（基于step）"""
+        self.step_losses.append(loss)
+        self.step_learning_rates.append(lr)
+        self.steps.append(step)
     
     def update_valid(self, loss: float, epoch: int):
         """更新验证指标"""
@@ -219,6 +231,9 @@ class TrainingMetrics:
             'valid_losses': self.valid_losses,
             'learning_rates': self.learning_rates,
             'epoch_times': self.epoch_times,
+            'step_losses': self.step_losses,
+            'step_learning_rates': self.step_learning_rates,
+            'steps': self.steps,
             'best_valid_loss': self.best_valid_loss,
             'best_epoch': self.best_epoch,
             'early_stopping_counter': self.early_stopping_counter
@@ -425,7 +440,7 @@ class DiffoldTrainer:
                 weight_decay=self.config.weight_decay,
                 scheduler_config={
                     'type': self.config.enhanced_features['optimizer']['scheduler_type'],
-                    'warmup_epochs': self.config.warmup_epochs,
+                    'warmup_steps': self.config.warmup_steps,
                     'T_max': self.config.num_epochs,
                     'eta_min': 1e-6
                 },
@@ -515,11 +530,17 @@ class DiffoldTrainer:
                     
                     batch_time = time.time() - batch_start_time
                     
+                    # 计算当前step
+                    current_step = batch_idx + epoch * len(self.train_loader)
+                    
+                    # 记录基于step的训练指标
+                    self.metrics.update_train_step(loss.item(), self.optimizer.param_groups[0]['lr'], current_step)
+                    
                     # 🔥 记录监控数据
                     if (self.training_monitor and 
                         batch_idx % self.config.enhanced_features['monitoring']['monitoring_interval'] == 0):
                         self.training_monitor.log_training_step(
-                            step=batch_idx + epoch * len(self.train_loader),
+                            step=current_step,
                             epoch=epoch,
                             loss_value=loss.item(),
                             learning_rate=self.optimizer.param_groups[0]['lr'],
@@ -668,6 +689,12 @@ class DiffoldTrainer:
                 else:
                     torch.nn.utils.clip_grad_norm_(self.model.get_trainable_parameters(), self.config.grad_clip_norm)
                 self.optimizer.step()
+        
+        # 基于step的调度器更新
+        if (self.scheduler is not None and 
+            not self.enhanced_optimizer and 
+            self.config.scheduler_type in ["warmup_cosine", "warmup_cosine_restarts"]):
+            self.scheduler.step()
         
         return loss
     
@@ -856,6 +883,10 @@ class DiffoldTrainer:
             self.metrics.valid_losses = metrics_dict.get('valid_losses', [])
             self.metrics.learning_rates = metrics_dict.get('learning_rates', [])
             self.metrics.epoch_times = metrics_dict.get('epoch_times', [])
+            # 恢复step-based指标
+            self.metrics.step_losses = metrics_dict.get('step_losses', [])
+            self.metrics.step_learning_rates = metrics_dict.get('step_learning_rates', [])
+            self.metrics.steps = metrics_dict.get('steps', [])
             self.metrics.best_valid_loss = metrics_dict.get('best_valid_loss', float('inf'))
             self.metrics.best_epoch = metrics_dict.get('best_epoch', 0)
             self.metrics.early_stopping_counter = metrics_dict.get('early_stopping_counter', 0)
@@ -866,41 +897,69 @@ class DiffoldTrainer:
     
     def plot_training_curves(self):
         """绘制训练曲线"""
-        if not self.metrics.train_losses:
+        if not self.metrics.train_losses and not self.metrics.step_losses:
             return
         
         fig, axes = plt.subplots(2, 2, figsize=(15, 10))
         
-        # 损失曲线
-        epochs = range(1, len(self.metrics.train_losses) + 1)
-        axes[0, 0].plot(epochs, self.metrics.train_losses, 'b-', label='Training Loss')
-        if self.metrics.valid_losses:
-            valid_epochs = range(1, len(self.metrics.valid_losses) + 1)
-            axes[0, 0].plot(valid_epochs, self.metrics.valid_losses, 'r-', label='Validation Loss')
-        axes[0, 0].set_xlabel('Epoch')
-        axes[0, 0].set_ylabel('Loss')
-        axes[0, 0].set_title('Training and Validation Loss')
-        axes[0, 0].legend()
-        axes[0, 0].grid(True)
+        # 损失曲线 - 基于step
+        if self.metrics.step_losses:
+            axes[0, 0].plot(self.metrics.steps, self.metrics.step_losses, 'b-', label='Training Loss (Step)', alpha=0.7)
+            axes[0, 0].set_xlabel('Step')
+            axes[0, 0].set_ylabel('Loss')
+            axes[0, 0].set_title('Training Loss (Step-based)')
+            axes[0, 0].legend()
+            axes[0, 0].grid(True)
+        else:
+            # 回退到基于epoch的绘图
+            epochs = range(1, len(self.metrics.train_losses) + 1)
+            axes[0, 0].plot(epochs, self.metrics.train_losses, 'b-', label='Training Loss')
+            if self.metrics.valid_losses:
+                valid_epochs = range(1, len(self.metrics.valid_losses) + 1)
+                axes[0, 0].plot(valid_epochs, self.metrics.valid_losses, 'r-', label='Validation Loss')
+            axes[0, 0].set_xlabel('Epoch')
+            axes[0, 0].set_ylabel('Loss')
+            axes[0, 0].set_title('Training and Validation Loss')
+            axes[0, 0].legend()
+            axes[0, 0].grid(True)
         
-        # 学习率曲线
-        if self.metrics.learning_rates:
-            axes[0, 1].plot(epochs, self.metrics.learning_rates, 'g-')
-            axes[0, 1].set_xlabel('Epoch')
+        # 学习率曲线 - 基于step
+        if self.metrics.step_learning_rates:
+            axes[0, 1].plot(self.metrics.steps, self.metrics.step_learning_rates, 'g-')
+            axes[0, 1].set_xlabel('Step')
             axes[0, 1].set_ylabel('Learning Rate')
-            axes[0, 1].set_title('Learning Rate Schedule')
+            axes[0, 1].set_title('Learning Rate Schedule (Step-based)')
             axes[0, 1].grid(True)
+        else:
+            # 回退到基于epoch的绘图
+            if self.metrics.learning_rates:
+                epochs = range(1, len(self.metrics.learning_rates) + 1)
+                axes[0, 1].plot(epochs, self.metrics.learning_rates, 'g-')
+                axes[0, 1].set_xlabel('Epoch')
+                axes[0, 1].set_ylabel('Learning Rate')
+                axes[0, 1].set_title('Learning Rate Schedule')
+                axes[0, 1].grid(True)
         
-        # 训练时间
+        # 训练时间（基于epoch）
         if self.metrics.epoch_times:
+            epochs = range(1, len(self.metrics.epoch_times) + 1)
             axes[1, 0].plot(epochs, self.metrics.epoch_times, 'orange')
             axes[1, 0].set_xlabel('Epoch')
             axes[1, 0].set_ylabel('Time (seconds)')
             axes[1, 0].set_title('Epoch Training Time')
             axes[1, 0].grid(True)
         
-        # 损失分布（最近10个epoch）
-        if len(self.metrics.train_losses) > 1:
+        # 损失分布（基于step或epoch）
+        if self.metrics.step_losses and len(self.metrics.step_losses) > 1:
+            # 基于step的损失分布
+            recent_losses = self.metrics.step_losses[-100:]  # 最近100个step
+            axes[1, 1].hist(recent_losses, bins=min(20, len(recent_losses)), alpha=0.7, color='blue')
+            axes[1, 1].set_xlabel('Loss')
+            axes[1, 1].set_ylabel('Frequency')
+            axes[1, 1].set_title('Recent Training Loss Distribution (Step-based)')
+            axes[1, 1].grid(True)
+        elif len(self.metrics.train_losses) > 1:
+            # 回退到基于epoch的损失分布
             recent_losses = self.metrics.train_losses[-10:]
             axes[1, 1].hist(recent_losses, bins=min(10, len(recent_losses)), alpha=0.7, color='blue')
             axes[1, 1].set_xlabel('Loss')
@@ -911,7 +970,7 @@ class DiffoldTrainer:
         plt.tight_layout()
         
         # 保存图像
-        plot_path = self.config.output_dir / "plots" / f"training_curves_epoch_{len(self.metrics.train_losses)}.png"
+        plot_path = self.config.output_dir / "plots" / f"training_curves_step_{len(self.metrics.steps) if self.metrics.steps else len(self.metrics.train_losses)}.png"
         plt.savefig(plot_path, dpi=300, bbox_inches='tight')
         plt.close()
         
@@ -964,12 +1023,13 @@ class DiffoldTrainer:
                 # 使用增强优化器
                 self.enhanced_optimizer.scheduler_step(valid_loss)
             else:
-                # 使用原版调度器
+                # 使用原版调度器（基于epoch的调度器）
                 if self.scheduler is not None:
                     if self.config.scheduler_type == "plateau" and valid_loss is not None:
                         self.scheduler.step(valid_loss)
                     elif self.config.scheduler_type == "cosine":
                         self.scheduler.step()
+                    # 注意：基于step的调度器（warmup_cosine, warmup_cosine_restarts）已在train_step中处理
             
             # 记录指标
             current_lr = self.optimizer.param_groups[0]['lr']
@@ -1147,7 +1207,7 @@ def run_small_scale_test(fixed_sample_name=None):
     # 基础测试配置
     config = TrainingConfig()
     config.test_mode = True
-    config.test_epochs = 1  # 测试2轮，验证完整流程
+    config.test_epochs = 2  # 测试2轮，验证完整流程
     config.test_samples = 1  # 稍微增加样本数测试批次处理
     config.max_sequence_length = 20
     config.num_workers = 2   # 测试数据加载
