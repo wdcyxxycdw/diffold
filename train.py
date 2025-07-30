@@ -8,6 +8,7 @@ import argparse
 import json
 import logging
 import time
+import yaml
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, cast
@@ -25,15 +26,36 @@ from diffold.diffold import Diffold
 from diffold.dataloader import create_data_loaders
 
 # 设置日志
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),  # 控制台输出
-    ]
-)
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)  # 明确设置logger级别
+def setup_logging(log_level: str = "INFO"):
+    """设置全局日志配置"""
+    level_map = {
+        "DEBUG": logging.DEBUG,
+        "INFO": logging.INFO,
+        "WARNING": logging.WARNING,
+        "ERROR": logging.ERROR,
+        "CRITICAL": logging.CRITICAL
+    }
+    
+    log_level = log_level.upper()
+    if log_level not in level_map:
+        log_level = "INFO"
+    
+    logging.basicConfig(
+        level=level_map[log_level],
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.StreamHandler(),  # 控制台输出
+        ]
+    )
+    
+    # 设置所有模块的日志级别
+    for logger_name in logging.root.manager.loggerDict:
+        logging.getLogger(logger_name).setLevel(level_map[log_level])
+    
+    return logging.getLogger(__name__)
+
+# 默认设置
+logger = setup_logging()
 
 # 🔥 导入增强功能模块
 try:
@@ -48,7 +70,7 @@ except ImportError as e:
 class TrainingConfig:
     """训练配置类 - 兼容原版和增强版"""
     
-    def __init__(self):
+    def __init__(self, config_file: Optional[str] = None):
         # 基础数据配置
         self.data_dir = "./processed_data"
         self.batch_size = 8
@@ -137,6 +159,13 @@ class TrainingConfig:
                 'reduce_batch_size_on_oom': True
             }
         }
+        
+        # 日志配置
+        self.log_level = "INFO"
+        
+        # 如果提供了配置文件，则加载配置
+        if config_file:
+            self.load_from_yaml(config_file)
     
     def apply_enhanced_preset(self, preset_name: str):
         """应用增强功能预设"""
@@ -178,6 +207,97 @@ class TrainingConfig:
             logger.info(f"✅ 应用预设: {preset_name}")
         else:
             logger.warning(f"未知预设: {preset_name}")
+    
+    def load_from_yaml(self, config_file: str):
+        """从YAML文件加载配置"""
+        config_path = Path(config_file)
+        if not config_path.exists():
+            raise FileNotFoundError(f"配置文件不存在: {config_file}")
+        
+        logger.info(f"📄 加载配置文件: {config_file}")
+        
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config_data = yaml.safe_load(f)
+        
+        # 加载数据配置
+        if 'data' in config_data:
+            data_config = config_data['data']
+            self.data_dir = data_config.get('data_dir', self.data_dir)
+            self.batch_size = data_config.get('batch_size', self.batch_size)
+            self.max_sequence_length = data_config.get('max_sequence_length', self.max_sequence_length)
+            self.num_workers = data_config.get('num_workers', self.num_workers)
+            self.use_msa = data_config.get('use_msa', self.use_msa)
+            self.fold = data_config.get('fold', self.fold)
+        
+        # 加载模型配置
+        if 'model' in config_data:
+            model_config = config_data['model']
+            self.rhofold_checkpoint = model_config.get('rhofold_checkpoint', self.rhofold_checkpoint)
+        
+        # 加载训练配置
+        if 'training' in config_data:
+            training_config = config_data['training']
+            self.num_epochs = training_config.get('num_epochs', self.num_epochs)
+            self.learning_rate = training_config.get('learning_rate', self.learning_rate)
+            self.weight_decay = training_config.get('weight_decay', self.weight_decay)
+            self.grad_clip_norm = training_config.get('grad_clip_norm', self.grad_clip_norm)
+            self.warmup_steps = training_config.get('warmup_steps', self.warmup_steps)
+            self.scheduler_type = training_config.get('scheduler_type', self.scheduler_type)
+            self.patience = training_config.get('patience', self.patience)
+            self.validate_every = training_config.get('validate_every', self.validate_every)
+            self.early_stopping_patience = training_config.get('early_stopping_patience', self.early_stopping_patience)
+        
+        # 加载输出配置
+        if 'output' in config_data:
+            output_config = config_data['output']
+            self.output_dir = output_config.get('output_dir', self.output_dir)
+            self.checkpoint_dir = output_config.get('checkpoint_dir', self.checkpoint_dir)
+            self.save_every = output_config.get('save_every', self.save_every)
+            self.keep_last_n_checkpoints = output_config.get('keep_last_n_checkpoints', self.keep_last_n_checkpoints)
+        
+        # 加载设备配置
+        if 'device' in config_data:
+            device_config = config_data['device']
+            device_str = device_config.get('device', 'auto')
+            if device_str == 'auto':
+                self.device = "cuda" if torch.cuda.is_available() else "cpu"
+            else:
+                self.device = device_str
+            self.mixed_precision = device_config.get('mixed_precision', self.mixed_precision)
+            self.use_torch_compile = device_config.get('use_torch_compile', self.use_torch_compile)
+            self.torch_compile_mode = device_config.get('torch_compile_mode', self.torch_compile_mode)
+        
+        # 加载多GPU配置
+        if 'multi_gpu' in config_data:
+            multi_gpu_config = config_data['multi_gpu']
+            self.use_data_parallel = multi_gpu_config.get('use_data_parallel', self.use_data_parallel)
+            self.gpu_ids = multi_gpu_config.get('gpu_ids', self.gpu_ids)
+        
+        # 加载交叉验证配置
+        if 'cross_validation' in config_data:
+            cv_config = config_data['cross_validation']
+            self.fold = cv_config.get('fold', self.fold)
+            self.num_folds = cv_config.get('num_folds', self.num_folds)
+            self.use_all_folds = cv_config.get('use_all_folds', self.use_all_folds)
+        
+        # 加载测试配置
+        if 'test' in config_data:
+            test_config = config_data['test']
+            self.test_mode = test_config.get('test_mode', self.test_mode)
+            self.test_samples = test_config.get('test_samples', self.test_samples)
+            self.test_epochs = test_config.get('test_epochs', self.test_epochs)
+        
+        # 加载日志配置
+        if 'logging' in config_data:
+            logging_config = config_data['logging']
+            self.log_level = logging_config.get('log_level', 'INFO')
+        
+        # 加载增强功能配置
+        if 'enhanced_features' in config_data:
+            enhanced_config = config_data['enhanced_features']
+            self.enhanced_features.update(enhanced_config)
+        
+        logger.info("✅ 配置文件加载完成")
 
 
 class TrainingMetrics:
@@ -1399,21 +1519,34 @@ def main():
     parser.add_argument("--grad_accum", type=int, default=None,
                        help="梯度累积步数 (gradient_accumulation_steps)，默认根据预设或1")
     
+    # 配置文件参数
+    parser.add_argument("--config", type=str, default='./config.yaml', help="配置文件路径")
+    
+    # 日志参数
+    parser.add_argument("--log_level", type=str, default="INFO",
+                       choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+                       help="日志级别 (默认: INFO)")
+    
     # 其他参数
     parser.add_argument("--resume", type=str, default=None, help="从检查点恢复训练")
     parser.add_argument("--test", action="store_true", help="运行多GPU环境小规模测试")
-    parser.add_argument("--fixed_sample_name", type=str, default='4v8a_AB', help="指定用于测试的固定样本名称")
+    parser.add_argument("--fixed_sample_name", type=str, default=None, help="指定用于测试的固定样本名称")
 
     
     args = parser.parse_args()
+    
+    # 创建配置（从配置文件或使用默认值）
+    config = TrainingConfig(args.config)
+    
+    # 重新设置日志级别（优先使用命令行参数，其次使用配置文件）
+    log_level = args.log_level if args.log_level else config.log_level
+    logger = setup_logging(log_level)
+    logger.info(f"设置日志级别: {log_level}")
     
     # 如果是测试模式
     if args.test:
         run_small_scale_test(fixed_sample_name=args.fixed_sample_name)
         return
-
-    # 创建配置
-    config = TrainingConfig()
     
     # 🔥 应用增强功能设置
     if args.disable_enhanced or not ENHANCED_FEATURES_AVAILABLE:
