@@ -185,7 +185,12 @@ class Diffold(nn.Module):
         self.ligand_loss_weight = 1.0
         
         # 添加维度适配层，将RhoFold的输出调整到diffusion模块期望的维度
-        self.single_dim_adapter = nn.Linear(256, 384)
+        # 使用带有Layer Normalization的适配器以提高稳定性
+        self.single_dim_adapter = nn.Sequential(
+            nn.Linear(256, 384),
+            nn.LayerNorm(384),
+            nn.ReLU(inplace=True)
+        )
         
         # 添加置信度头部，仿照AlphaFold3
         # ConfidenceHead需要列表格式的bins
@@ -558,6 +563,9 @@ class Diffold(nn.Module):
             single_fea = self.single_dim_adapter(single_fea)
         if pair_fea is not None:
             pair_fea = pair_fea.detach()
+            # 为pair_fea添加Layer Normalization以提高稳定性
+            # pair_fea: [bs, seq_len, seq_len, 128]
+            pair_fea = F.layer_norm(pair_fea, pair_fea.shape[-1:])
             
         # single_fea: [bs, seq_len, dim_single(384)] 
         # pair_fea: [bs, seq_len, seq_len, dim_pairwise(128)]
