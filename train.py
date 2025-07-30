@@ -1354,7 +1354,7 @@ def run_small_scale_test(fixed_sample_name=None):
     else:
         logger.info(f"🚀 多GPU模式测试 ({gpu_count} GPUs)")
         config.device = "cuda"
-        config.batch_size = 2 
+        config.batch_size = 1
         config.mixed_precision = True
         config.use_data_parallel = True
         

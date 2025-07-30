@@ -81,7 +81,7 @@ enhanced_features:
   optimizer:
     use_advanced_optimizer: true
     optimizer_name: "adamw"  # "adamw", "adam", "sgd", "lion"
-    gradient_accumulation_steps: 1
+    gradient_accumulation_steps: 2
     scheduler_type: "warmup_cosine"  # "warmup_cosine", "warmup_cosine_restarts", "plateau"
   
   # 数据加载器配置
