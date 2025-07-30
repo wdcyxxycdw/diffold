@@ -1289,7 +1289,7 @@ def main():
     
     # 数据参数
     parser.add_argument("--data_dir", type=str, default="./processed_data", help="数据目录")
-    parser.add_argument("--batch_size", type=int, default=4, help="批次大小")
+    parser.add_argument("--batch_size", type=int, default=1, help="批次大小")
     parser.add_argument("--max_length", type=int, default=256, help="最大序列长度")
     parser.add_argument("--num_workers", type=int, default=4, help="数据加载进程数")
     parser.add_argument("--fold", type=int, default=0, help="交叉验证折数 (0-9)")

@@ -542,64 +542,9 @@ class Diffold(nn.Module):
         batch_num = tokens.shape[0]
         is_batched = batch_num > 1
         try:
-            if is_batched:
-                # 获取序列长度信息
-                if seq_lengths is None:
-                    # 如果没有提供seq_lengths，尝试从seq中推断
-                    if isinstance(seq, list):
-                        seq_lengths = torch.tensor([len(s) for s in seq], device=tokens.device)
-                    else:
-                        # 假设所有序列都是最大长度（保持原有行为）
-                        seq_lengths = torch.full((batch_num,), tokens.shape[1], device=tokens.device)
-                
-                # 准备存储结果的列表
-                single_features = []
-                pair_features = []
-                max_seq_len = tokens.shape[2]  # padding后的最大长度
-                
-                logger.info(f"处理batch: {batch_num}个序列, 最大长度: {max_seq_len}")
-                
-                for i in range(batch_num):
-                    if seq_lengths is not None:
-                        current_seq_len = seq_lengths[i].item()
-                    else:
-                        current_seq_len = tokens.shape[2]  # 使用padding后的最大长度
-                    logger.debug(f"处理序列 {i+1}/{batch_num}, 真实长度: {current_seq_len}")
-                    
-                    # 去掉padding，只保留真实序列部分
-                    current_tokens = tokens[i:i+1, :, :current_seq_len]  # [1, MSA_depth, real_len]
-                    current_rna_fm_tokens = rna_fm_tokens[i:i+1, :current_seq_len] if rna_fm_tokens is not None else None
-                    
-                    current_seq = seq[i]
-                    
-                    # 处理当前序列
-                    with torch.no_grad():
-                        logger.debug(f"RhoFold输入[{i}]: tokens {current_tokens.shape}, rna_fm_tokens {current_rna_fm_tokens.shape if current_rna_fm_tokens is not None else 'None'}")
-                        outputs, single, pair = self.rhofold(current_tokens, current_rna_fm_tokens, current_seq, **kwargs)
-                        
-                        # single: [1, real_len, 256], pair: [1, real_len, real_len, 128]
-                        logger.debug(f"RhoFold输出[{i}]: single {single.shape}, pair {pair.shape}")
-                        
-                        # 将结果padding回原始大小以便后续batch处理
-                        padded_single = torch.zeros(1, max_seq_len, single.shape[-1], device=tokens.device)
-                        padded_pair = torch.zeros(1, max_seq_len, max_seq_len, pair.shape[-1], device=tokens.device)
-                        
-                        padded_single[:, :current_seq_len] = single
-                        padded_pair[:, :current_seq_len, :current_seq_len] = pair
-                        
-                        single_features.append(padded_single)
-                        pair_features.append(padded_pair)
-                
-                # 将所有序列的结果重新组合成batch
-                single_fea = torch.cat(single_features, dim=0)  # [batch_num, max_seq_len, 256]
-                pair_fea = torch.cat(pair_features, dim=0)      # [batch_num, max_seq_len, max_seq_len, 128]
-                
-                logger.debug(f"合并后的特征: single {single_fea.shape}, pair {pair_fea.shape}")
-                
-            else:
-                with torch.no_grad():
-                    logger.debug(f"RhoFold输入: {tokens.shape} {rna_fm_tokens.shape if rna_fm_tokens is not None else 'None'}")
-                    outputs, single_fea, pair_fea = self.rhofold(tokens, rna_fm_tokens, seq[0], **kwargs)
+            with torch.no_grad():
+                logger.debug(f"RhoFold输入: {tokens.shape} {rna_fm_tokens.shape if rna_fm_tokens is not None else 'None'}")
+                outputs, single_fea, pair_fea = self.rhofold(tokens, rna_fm_tokens, seq[0], **kwargs)
         except Exception as e:
             logger.error(f"⚠️ RhoFold前向传播失败: {e}")
             import traceback
@@ -626,51 +571,12 @@ class Diffold(nn.Module):
         # 处理target_coords，将batch张量转换为列表格式
         atom_pos_list = None
         if target_coords is not None:
-            if is_batched:
-                # 为batch处理准备输入列表
-                input_list = []
-                for i in range(batch_num):
-                    if seq_lengths is not None:
-                        current_seq_len = seq_lengths[i].item()
-                    else:
-                        current_seq_len = tokens.shape[2]  # 使用padding后的最大长度
-                    
-                    # 获取当前序列的坐标
-                    if missing_atom_mask is not None:
-                        # 使用missing_atom_mask确定真实原子数量
-                        current_missing_mask = missing_atom_mask[i]  # type: ignore
-                        # 找到有效原子的数量
-                        valid_atoms = (~current_missing_mask).sum().item()
-                        if valid_atoms > 0:
-                            current_coords = target_coords[i, :valid_atoms]  # [valid_atoms, 3]
-                        else:
-                            # 如果没有有效原子，创建空张量
-                            current_coords = torch.empty(0, 3, device=target_coords.device)
-                    else:
-                        # 如果没有missing_atom_mask，使用所有坐标
-                        current_coords = target_coords[i]  # [max_atoms, 3]
-                    
-                    # 为每个序列创建单独的输入字典
-                    input_dict = {
-                        'ss_rna': [seq[i]],  # type: ignore # 单个序列作为列表
-                        'atom_pos': [current_coords]  # 单个坐标张量作为列表
-                    }
-                    input_list.append(input_dict)
-                    
-                    logger.debug(f"序列[{i}]: {seq[i][:10] if seq is not None else 'None'}..., 序列长度: {current_seq_len}, 原子数: {current_coords.shape[0]}")
-                
-                # 使用process_multiple_alphafold3_inputs处理batch
-                result = process_multiple_alphafold3_inputs(
-                    input_list, 
-                )
-                af_in, atom_mask = result  # type: ignore
-            else:
-                atom_pos_list = [target_coords[0]]
-                
-                af_in, atom_mask = process_alphafold3_input(
-                    ss_rna=[seq[0]] if seq is not None else [],
-                    atom_pos=atom_pos_list,
-                )
+            atom_pos_list = [target_coords[0]]
+            
+            af_in, atom_mask = process_alphafold3_input(
+                ss_rna=[seq[0]] if seq is not None else [],
+                atom_pos=atom_pos_list,
+            )
         else:
             logger.warning("没有目标坐标")
             exit()
