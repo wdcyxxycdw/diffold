@@ -1540,10 +1540,10 @@ def main():
     # 重新设置日志级别（配置文件优先级更高，只有明确指定命令行参数时才覆盖）
     if args.log_level is not None:
         log_level = args.log_level
-        logger.info(f"使用命令行指定的日志级别: {log_level}")
+        print(f"使用命令行指定的日志级别: {log_level}")
     else:
         log_level = config.log_level
-        logger.info(f"使用配置文件中的日志级别: {log_level}")
+        print(f"使用配置文件中的日志级别: {log_level}")
     
     logger = setup_logging(log_level)
     
