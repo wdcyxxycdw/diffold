@@ -1238,8 +1238,16 @@ class DiffoldTrainer:
             
             logger.info(f"✅ 标准调度器已更新: {scheduler_type}")
 
-    def load_checkpoint(self, checkpoint_path: str) -> int:
-        """加载检查点"""
+    def load_checkpoint(self, checkpoint_path: str, 
+                       skip_optimizer_state: bool = False,
+                       skip_scheduler_state: bool = False) -> int:
+        """加载检查点
+        
+        Args:
+            checkpoint_path: 检查点文件路径
+            skip_optimizer_state: 是否跳过优化器状态加载（用于学习率修改）
+            skip_scheduler_state: 是否跳过调度器状态加载（用于调度器修改）
+        """
         checkpoint_path = Path(checkpoint_path)
         if not checkpoint_path.exists():
             logger.warning(f"检查点文件不存在: {checkpoint_path}")
@@ -1256,22 +1264,29 @@ class DiffoldTrainer:
         else:
             self.model.load_state_dict(model_state_dict)
         
-        # 加载优化器状态
-        try:
-            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            logger.info("✅ 优化器状态加载成功")
-        except Exception as e:
-            logger.warning(f"⚠️ 优化器状态加载失败: {e}")
-            logger.info("继续使用当前优化器配置")
+        # 加载优化器状态（可选跳过）
+        if not skip_optimizer_state:
+            try:
+                self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                logger.info("✅ 优化器状态加载成功")
+            except Exception as e:
+                logger.warning(f"⚠️ 优化器状态加载失败: {e}")
+                logger.info("继续使用当前优化器配置")
+        else:
+            logger.info("🔄 跳过优化器状态加载（准备修改学习率）")
         
-        # 加载调度器状态
-        if self.scheduler and checkpoint.get('scheduler_state_dict'):
+        # 加载调度器状态（可选跳过）
+        if not skip_scheduler_state and self.scheduler and checkpoint.get('scheduler_state_dict'):
             try:
                 self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
                 logger.info("✅ 学习率调度器状态加载成功")
             except Exception as e:
                 logger.warning(f"⚠️ 调度器状态加载失败: {e}")
                 logger.info("使用当前调度器配置继续训练")
+        elif skip_scheduler_state:
+            logger.info("🔄 跳过调度器状态加载（准备修改调度策略）")
+        else:
+            logger.info("📝 没有调度器状态需要加载")
         
         # 加载GradScaler状态
         if self.scaler and checkpoint.get('scaler_state_dict'):
@@ -1408,9 +1423,24 @@ class DiffoldTrainer:
         # 加载检查点（如果指定）
         start_epoch = 0
         if resume_from:
-            start_epoch = self.load_checkpoint(resume_from)
+            # 判断是否需要跳过优化器/调度器状态加载
+            skip_optimizer = modify_lr is not None
+            skip_scheduler = lr_schedule_override is not None or (modify_lr is not None and not keep_scheduler_progress)
             
-            # 在恢复后处理学习率修改选项
+            if skip_optimizer or skip_scheduler:
+                logger.info("🔄 智能加载模式:")
+                if skip_optimizer:
+                    logger.info("  - 跳过优化器状态加载（准备修改学习率）")
+                if skip_scheduler:
+                    logger.info("  - 跳过调度器状态加载（准备重置调度策略）")
+            
+            start_epoch = self.load_checkpoint(
+                resume_from, 
+                skip_optimizer_state=skip_optimizer,
+                skip_scheduler_state=skip_scheduler
+            )
+            
+            # 在跳过状态加载后处理学习率修改选项
             if modify_lr is not None:
                 self.modify_learning_rate(
                     modify_lr, 
