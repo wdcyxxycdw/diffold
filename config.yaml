@@ -25,6 +25,17 @@ training:
   scheduler_type: "cosine"  # "cosine", "plateau"
   patience: 10
   
+  # 学习率修改配置
+  learning_rate_modification:
+    enable_runtime_modification: true  # 允许运行时修改学习率
+    save_modification_history: true   # 保存修改历史
+    log_lr_changes: true              # 记录学习率变化日志
+    validation_checks:
+      min_lr: 1.0e-7                  # 最小学习率限制
+      max_lr: 1.0e-1                  # 最大学习率限制
+      warn_on_large_changes: true     # 对大幅度变化发出警告
+      large_change_threshold: 10.0    # 大幅度变化的阈值（倍数）
+  
   # 验证配置
   validate_every: 1
   early_stopping_patience: 20

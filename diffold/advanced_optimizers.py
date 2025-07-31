@@ -392,6 +392,35 @@ class AdaptiveOptimizer:
             stats['avg_param_norm'] = sum(self.stats['param_norm_history']) / len(self.stats['param_norm_history'])
         
         return stats
+    
+    def load_stats(self, stats_dict: Dict[str, Any]):
+        """加载优化器统计信息
+        
+        Args:
+            stats_dict: 统计信息字典
+        """
+        # 恢复基本统计信息
+        for key in ['update_count', 'grad_norm_history', 'lr_history', 'param_norm_history']:
+            if key in stats_dict:
+                self.stats[key] = stats_dict[key]
+        
+        # 恢复累积步数
+        self.accumulated_steps = stats_dict.get('accumulated_steps', 0)
+        
+        logger.info(f"📊 加载优化器统计: 更新次数={self.stats['update_count']}, "
+                   f"梯度历史={len(self.stats['grad_norm_history'])}, "
+                   f"学习率历史={len(self.stats['lr_history'])}")
+    
+    def reset_stats(self):
+        """重置统计信息"""
+        self.stats = {
+            'update_count': 0,
+            'grad_norm_history': [],
+            'lr_history': [],
+            'param_norm_history': []
+        }
+        self.accumulated_steps = 0
+        logger.info("📊 优化器统计信息已重置")
 
 
 class DataLoaderOptimizer:
