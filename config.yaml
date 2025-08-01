@@ -16,7 +16,7 @@ model:
 # 训练配置
 training:
   num_epochs: 100
-  learning_rate: 0.0003
+  learning_rate: 0.0001
   weight_decay: 0.00001
   grad_clip_norm: 1.0
   warmup_steps: 1000  # 预热步数（基于step而不是epoch）
@@ -38,14 +38,14 @@ training:
   
   # 验证配置
   validate_every: 1
-  early_stopping_patience: 20
+  early_stopping_patience: 10
 
 # 输出配置
 output:
   output_dir: "./output"
   checkpoint_dir: "./checkpoints"
   save_every: 1
-  keep_last_n_checkpoints: 10
+  keep_last_n_checkpoints: 100
 
 # 设备配置
 device:

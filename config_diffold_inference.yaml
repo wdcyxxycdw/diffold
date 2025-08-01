@@ -1,0 +1,32 @@
+# Diffold推理配置文件
+# 基本参数
+device: "cuda:0"  # 或 "cpu"
+checkpoint_path: "./checkpoints/diffold_best.pt"  # Diffold模型检查点
+rhofold_checkpoint: "./pretrained/model_20221010_params.pt"  # RhoFold预训练模型
+
+# 输入输出
+input_fas: "./example/input/3owzA/3owzA.fasta"  # 输入FASTA文件
+input_a3m: null  # 输入MSA文件（可选）
+output_dir: "./example/output/diffold_3owzA"  # 输出目录
+
+# 优化参数
+relax_steps: 1000  # Amber优化步数
+
+# Diffold模型配置
+# 这些参数会传递给Diffold模型
+model_config:
+  # 扩散模型参数
+  diffusion_steps: 1000
+  noise_schedule: "cosine"
+  
+  # 损失权重
+  loss_diffusion_weight: 1.0
+  loss_confidence_weight: 0.1
+  loss_distogram_weight: 0.1
+  
+  # 采样参数
+  num_sample_steps: 32
+  
+  # 其他参数
+  nucleotide_loss_weight: 1.0
+  ligand_loss_weight: 1.0 
