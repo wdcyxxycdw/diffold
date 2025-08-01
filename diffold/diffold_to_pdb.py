@@ -186,7 +186,7 @@ def format_atom_line(
     b_factor: float
 ) -> str:
     """
-    格式化PDB ATOM行
+    格式化PDB ATOM行，严格遵循PDB格式标准
     
     Args:
         atom_num: 原子编号
@@ -202,40 +202,61 @@ def format_atom_line(
         str: 格式化的ATOM行
     """
     
-    # 确保原子名称格式正确
+    # 确保原子名称格式正确(4个字符，左对齐)
     if len(atom_name) == 1:
-        atom_name = f" {atom_name} "
+        atom_name_formatted = f" {atom_name}  "
     elif len(atom_name) == 2:
-        atom_name = f" {atom_name}"
+        atom_name_formatted = f" {atom_name} "
     elif len(atom_name) == 3:
-        atom_name = f"{atom_name}"
+        atom_name_formatted = f" {atom_name}"
+    elif len(atom_name) == 4:
+        atom_name_formatted = atom_name
     else:
-        atom_name = atom_name[:3]
+        atom_name_formatted = atom_name[:4]
     
-    # 格式化坐标
-    x_str = f"{x:8.3f}"
-    y_str = f"{y:8.3f}"
-    z_str = f"{z:8.3f}"
+    # 提取元素符号（原子名的第一个字母，通常是元素）
+    element = atom_name.strip()[0]
     
-    # 格式化占有率
-    occupancy_str = f"{occupancy:6.2f}"
+    # 严格按照PDB格式构建ATOM行 - 逐列精确构建
+    # PDB格式要求坐标从第31列开始（0-based index 30）
     
-    # 格式化B因子
-    b_factor_str = f"{b_factor:6.2f}"
+    # 构建各个部分
+    record_name = "ATOM  "                          # 列1-6
+    atom_serial = f"{atom_num:5d}"                  # 列7-11  
+    space1 = " "                                    # 列12
+    atom_name_part = f"{atom_name_formatted}"       # 列13-16
+    space2 = " "                                    # 列17
+    residue_name_part = f"{residue_name:>3}"        # 列18-20
+    space3 = " "                                    # 列21
+    chain_part = f"{chain_id}"                      # 列22
+    residue_num_part = f"{residue_num:4d}"          # 列23-26
+    insertion_code = " "                            # 列27
+    spaces_before_coords = "   "                    # 列28-30
     
-    # 构建完整的ATOM行
+    # 坐标字段（右对齐，宽度8，精度3）
+    x_coord = f"{x:8.3f}"                          # 列31-38
+    y_coord = f"{y:8.3f}"                          # 列39-46
+    z_coord = f"{z:8.3f}"                          # 列47-54
+    
+    # 其他字段
+    occupancy_part = f"{occupancy:6.2f}"           # 列55-60
+    b_factor_part = f"{b_factor:6.2f}"             # 列61-66
+    spaces_before_element = "          "            # 列67-76
+    element_part = f"{element:>2}"                  # 列77-78
+    
+    # 组装完整行
     line = (
-        f"ATOM  {atom_num:5d} {atom_name}{residue_name:>3} {chain_id}{residue_num:4d}    "
-        f"{x_str}{y_str}{z_str}{occupancy_str}{b_factor_str}          {atom_name[1]:>2}"
+        record_name + atom_serial + space1 + atom_name_part + space2 +
+        residue_name_part + space3 + chain_part + residue_num_part + 
+        insertion_code + spaces_before_coords + x_coord + y_coord + z_coord +
+        occupancy_part + b_factor_part + spaces_before_element + element_part
     )
     
-    # 确保行长度为80字符
-    if len(line) != 80:
-        # 调整长度
-        if len(line) < 80:
-            line = line.ljust(80)
-        else:
-            line = line[:80]
+    # 确保行长度为78字符（不包括换行符）
+    if len(line) > 78:
+        line = line[:78]
+    elif len(line) < 78:
+        line = line.ljust(78)
     
     return line
 

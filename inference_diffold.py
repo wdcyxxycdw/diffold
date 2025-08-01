@@ -61,8 +61,18 @@ def main(config):
     # 加载检查点
     if config.checkpoint_path:
         logger.info(f'加载检查点: {config.checkpoint_path}')
-        checkpoint = torch.load(config.checkpoint_path, map_location=config.device)
-        model.load_state_dict(checkpoint['model_state_dict'])
+        try:
+            # 尝试只加载模型权重，避免加载优化器状态
+            checkpoint = torch.load(config.checkpoint_path, map_location=config.device, weights_only=True)
+            if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+                model.load_state_dict(checkpoint['model_state_dict'])
+            else:
+                model.load_state_dict(checkpoint)
+        except Exception as e:
+            logger.warning(f'weights_only=True 加载失败，回退到完整加载: {e}')
+            # 回退到加载完整检查点，但只使用模型权重
+            checkpoint = torch.load(config.checkpoint_path, map_location=config.device, weights_only=False)
+            model.load_state_dict(checkpoint['model_state_dict'])
         logger.info('检查点加载完成')
     
     # 读取输入序列
@@ -91,8 +101,8 @@ def main(config):
     data_dict = get_features(config.input_fas, config.input_a3m)
     
     # 转换为Diffold输入格式
-    tokens = data_dict['tokens'].unsqueeze(0).to(config.device)  # 添加批次维度
-    rna_fm_tokens = data_dict['rna_fm_tokens'].unsqueeze(0).to(config.device)
+    tokens = data_dict['tokens'].to(config.device)  # 添加批次维度
+    rna_fm_tokens = data_dict['rna_fm_tokens'].to(config.device)
     seq = [sequence]  # Diffold期望序列列表
     
     logger.info(f'输入张量形状: tokens={tokens.shape}, rna_fm_tokens={rna_fm_tokens.shape}')
@@ -172,7 +182,7 @@ def main(config):
                 try:
                     amber_relax = AmberRelaxation(
                         max_iterations=relax_steps, 
-                        use_gpu=config.device.startswith('cuda'),
+                        use_gpu=False,  # 强制使用CPU避免CUDA问题
                         logger=logger
                     )
                     relaxed_model = f'{config.output_dir}/diffold_relaxed_{relax_steps}_model.pdb'
