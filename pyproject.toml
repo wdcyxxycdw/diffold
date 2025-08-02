@@ -21,6 +21,11 @@ dependencies = [
     # Bioinformatics
     "biopython>=1.79",
     "bio>=1.4.0",
+    # RNA structure analysis
+    "biotite>=1.4.0",
+    "rna-tools>=3.24.0",
+    "rnadvisor>=2.0.0",
+    "pdanalysis>=0.0.4",
     # Machine learning and data processing
     "einops>=0.5.0",
     "dm-tree>=0.1.7",

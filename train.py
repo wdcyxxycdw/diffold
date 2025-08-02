@@ -60,7 +60,8 @@ logger = setup_logging()
 # 🔥 导入增强功能模块
 try:
     from diffold.training_monitor import TrainingMonitor
-    from diffold.advanced_optimizers import AdaptiveOptimizer, DataLoaderOptimizer, RNAEvaluationMetrics
+    from diffold.advanced_optimizers import AdaptiveOptimizer, DataLoaderOptimizer
+    from diffold.rna_metrics import RNAEvaluationMetrics
     ENHANCED_FEATURES_AVAILABLE = True
 except ImportError as e:
     logger.warning(f"⚠️ 增强功能不可用: {e}")
@@ -823,7 +824,8 @@ class DiffoldTrainer:
                 batch_size=batch['tokens'].size(0),
                 loss_breakdown=loss_breakdown,
                 predicted_coords=result.get('predicted_coords'),
-                target_coords=coordinates
+                target_coords=coordinates,
+                sequences=sequences
             )
         
         # 反向传播
@@ -935,7 +937,8 @@ class DiffoldTrainer:
                                     batch_size=batch['tokens'].size(0),
                                     predicted_coords=result.get('predicted_coords'),
                                     target_coords=coordinates,
-                                    confidence_scores=result.get('confidence_logits')
+                                    confidence_scores=result.get('confidence_logits'),
+                                    sequences=sequences
                                 )
                             
                             # 美化验证进度条显示
