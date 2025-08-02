@@ -1,14 +1,18 @@
 """
 使用 Biotite 的 RNA 结构评估 + 自定义 TM-score + Clash score
 -----------------------------------------------------------
-- RMSD、lDDT: 调 Biotite 官方实现
-- TM-score  : 纯 NumPy，支持自定义 d0 / 不同原子选择
-- Clash score: 纯 NumPy，MolProbity 定义
+- RMSD、lDDT : Biotite 官方实现
+- TM-score   : 纯 NumPy，可自定义 d0
+- Clash score: 纯 NumPy，自动补氢后按 MolProbity 定义
 """
 
-import torch, numpy as np, logging, tempfile, os
+import os, tempfile, logging
 from typing import Dict, List, Optional, Tuple
 from collections import defaultdict
+
+import numpy as np
+import torch
+import gemmi                          # 自动补氢
 
 try:
     import biotite.structure as struc
@@ -29,12 +33,10 @@ class RNAEvaluationMetrics:
         tm_selection: str = "P",              # 'P'|'all_heavy'|'all'
         tm_d0_mode: str = "rna_casp",         # 'rna_casp'|'protein'|'custom'
         tm_d0_custom: Optional[float] = None,
-        clash_use_h: bool = False             # True -> 统计氢; False -> 只看非氢
     ):
-        self.tm_selection   = tm_selection
-        self.tm_d0_mode     = tm_d0_mode
-        self.tm_d0_custom   = tm_d0_custom
-        self.clash_use_h    = clash_use_h
+        self.tm_selection = tm_selection
+        self.tm_d0_mode  = tm_d0_mode
+        self.tm_d0_custom = tm_d0_custom
         self.reset()
         self._check_biotite()
 
@@ -53,7 +55,7 @@ class RNAEvaluationMetrics:
         self.rmsd_values  = []
         self.lddt_scores  = []
         self.tm_scores    = []
-        self.clash_scores = []            # ← 新增
+        self.clash_scores = []
 
         self.confidence_scores = []
 
@@ -124,14 +126,12 @@ class RNAEvaluationMetrics:
             diffold_coords_to_pdb(pred_coords, sequence or "", pred_pdb)
             diffold_coords_to_pdb(target_coords, sequence or "", ref_pdb)
 
+            # ---------- RMSD / lDDT 用原始重原子 ----------
             ref  = bio.load_structure(ref_pdb)
             pred = bio.load_structure(pred_pdb)
 
-            # ---------- RMSD ----------
-            rmsd_val = struc.rmsd(pred, ref)
-
-            # ---------- lDDT ----------
-            lddt_val = struc.lddt(ref, pred) * 100.0
+            rmsd_val  = struc.rmsd(pred, ref)
+            lddt_val  = struc.lddt(ref, pred) * 100.0
 
             # ---------- TM-score ----------
             ref_xyz, pred_xyz = self._tm_select_xyz(ref, pred, self.tm_selection)
@@ -140,8 +140,10 @@ class RNAEvaluationMetrics:
             d0  = self._get_d0(L, self.tm_d0_mode, self.tm_d0_custom)
             tm  = self._tm_score(P_aln, Qc, d0)
 
-            # ---------- Clash score ----------
-            clash = self._clash_score(pred, use_h=self.clash_use_h)
+            # ---------- Clash score：先给预测结构补氢 ----------
+            pred_h_path = self._add_hydrogens_gemmi(pred_pdb)
+            pred_h = bio.load_structure(pred_h_path)
+            clash  = self._clash_score(pred_h)
 
             return {"rmsd": rmsd_val, "lddt": lddt_val, "tm_score": tm, "clash": clash}
 
@@ -209,22 +211,27 @@ class RNAEvaluationMetrics:
         return float(np.mean(1.0 / (1.0 + dist2 / (d0 * d0))))
 
     # ----------  Clash score 工具函数 ----------
-    def _clash_score(self, structure, use_h=False) -> float:
-        """
-        MolProbity 定义：重叠 ≥0.4 Å 的原子对数 ×1000 / 原子总数
-        * 简化版：不排除共价键、忽略12邻域，足够评估模型几何质量趋势
-        """
-        mask = (structure.element != "H") if not use_h else np.ones(structure.array_length(), bool)
-        coords = structure.coord[mask]
-        elem   = structure.element[mask]
+    def _add_hydrogens_gemmi(self, pdb_path: str) -> str:
+        """Gemmi 加氢，返回新文件路径"""
+        model = gemmi.read_structure(pdb_path)
+        model.add_hydrogens()               # pH≈7 规则
+        tmp = tempfile.NamedTemporaryFile(suffix="_H.pdb", delete=False)
+        model.write_pdb(tmp.name)
+        return tmp.name
 
-        # CellList 邻近搜索
+    def _clash_score(self, structure) -> float:
+        """
+        MolProbity all-atom clashscore: 重叠 ≥0.4 Å 的原子对 ×1000 / 原子总数
+        简化实现：不排除共价键、忽略 1-3/1-4 对，足够衡量几何质量趋势
+        """
+        coords = structure.coord
+        elem   = structure.element
+
         cell = struc.CellList(coords, cell_size=5.0)
         pairs = cell.get_atom_pairs(5.0)
         if pairs.size == 0:
             return 0.0
 
-        # 范德华半径向量化
         vdw = np.vectorize(struc.info.vdw_radius_single)(elem)
         sum_r = vdw[pairs[:, 0]] + vdw[pairs[:, 1]] - 0.4
         dists = struc.distance(coords[pairs[:, 0]], coords[pairs[:, 1]])
@@ -241,7 +248,7 @@ class RNAEvaluationMetrics:
             "batch_count": self.batch_count,
             "total_samples": self.total_samples,
             "structure_type": "RNA",
-            "metrics_method": "Biotite+Custom(TM/Clash)",
+            "metrics_method": "Biotite+Custom(TM)+All-Atom Clash",
         }
         for k, v in self.loss_components.items():
             m[f"avg_{k}"] = v / self.total_samples
@@ -270,16 +277,15 @@ class RNAEvaluationMetrics:
                 std_tm=float(np.std(self.tm_scores)),
                 tm_selection=self.tm_selection,
                 tm_d0_mode=self.tm_d0_mode,
-                **({"tm_d0_custom": float(self.tm_d0_custom)} if self.tm_d0_mode == "custom" else {}),
+                **({"tm_d0_custom": float(self.tm_d0_custom)}
+                   if self.tm_d0_mode == "custom" else {}),
             )
         if self.clash_scores:
             m.update(
                 avg_clash=float(np.mean(self.clash_scores)),
                 median_clash=float(np.median(self.clash_scores)),
                 std_clash=float(np.std(self.clash_scores)),
-                clash_use_h=self.clash_use_h,
             )
-
         if self.confidence_scores:
             m.update(
                 avg_confidence=float(np.mean(self.confidence_scores)),
