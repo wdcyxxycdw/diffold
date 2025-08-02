@@ -13,3 +13,4 @@ mismatch_report.txt
 *.log
 checkpoints/
 output/
+*.pt
