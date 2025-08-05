@@ -294,7 +294,14 @@ class AdaptiveOptimizer:
         """反向传播"""
         # 缩放损失以考虑梯度累积
         scaled_loss = loss / self.gradient_accumulation_steps
-        scaled_loss.backward()
+        
+        # 混合精度训练处理
+        if self.scaler is not None:
+            # 使用scaler进行反向传播
+            self.scaler.scale(scaled_loss).backward()
+        else:
+            # 标准反向传播
+            scaled_loss.backward()
         
         self.accumulated_steps += 1
         
