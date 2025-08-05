@@ -25,6 +25,27 @@ import os
 from diffold.diffold import Diffold
 from diffold.dataloader import create_data_loaders
 
+# 导入增强功能模块
+from diffold.training_monitor import TrainingMonitor
+from diffold.advanced_optimizers import AdaptiveOptimizer, DataLoaderOptimizer
+from diffold.metrics import RNAEvaluationMetrics
+
+# 工具函数
+def format_time(seconds):
+    """格式化时间显示"""
+    if seconds < 60:
+        return f"{seconds:.1f}秒"
+    elif seconds < 3600:
+        minutes = seconds / 60
+        return f"{minutes:.1f}分钟"
+    else:
+        hours = seconds / 3600
+        return f"{hours:.1f}小时"
+
+def format_datetime(timestamp):
+    """格式化日期时间显示"""
+    return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+
 # 设置日志
 def setup_logging(log_level: str = "INFO"):
     """设置全局日志配置"""
@@ -56,16 +77,6 @@ def setup_logging(log_level: str = "INFO"):
 
 # 默认设置
 logger = setup_logging()
-
-# 🔥 导入增强功能模块
-try:
-    from diffold.training_monitor import TrainingMonitor
-    from diffold.advanced_optimizers import AdaptiveOptimizer, DataLoaderOptimizer, RNAEvaluationMetrics
-    ENHANCED_FEATURES_AVAILABLE = True
-except ImportError as e:
-    logger.warning(f"⚠️ 增强功能不可用: {e}")
-    logger.info("💡 安装依赖: pip install psutil matplotlib")
-    ENHANCED_FEATURES_AVAILABLE = False
 
 class TrainingConfig:
     """训练配置类 - 兼容原版和增强版"""
@@ -114,19 +125,19 @@ class TrainingConfig:
         self.use_data_parallel = True
         self.gpu_ids = None
         
-        # 小规模测试配置
-        self.test_mode = False
-        self.test_samples = 10
-        self.test_epochs = 5
-        
         # 交叉验证配置
         self.fold = 0
         self.num_folds = 10
         self.use_all_folds = False
         
+        # 小规模测试配置
+        self.test_mode = False
+        self.test_samples = 10
+        self.test_epochs = 5
+        
         # 🔥 增强功能配置
         self.enhanced_features = {
-            'enable_enhanced_training': ENHANCED_FEATURES_AVAILABLE,  # 总开关
+            'enable_enhanced_training': True,  # 总开关
             'monitoring': {
                 'enable_performance_monitoring': True,
                 'enable_memory_monitoring': True,
@@ -182,10 +193,6 @@ class TrainingConfig:
     
     def apply_enhanced_preset(self, preset_name: str):
         """应用增强功能预设"""
-        if not ENHANCED_FEATURES_AVAILABLE:
-            logger.warning("增强功能不可用，跳过预设应用")
-            return
-        
         presets = {
             'performance': {
                 'dataloader': {'enable_prefetch': True, 'prefetch_factor': 3},
@@ -205,8 +212,7 @@ class TrainingConfig:
             },
             'debug': {
                 'monitoring': {'monitoring_interval': 1, 'save_monitoring_plots': True},
-                'evaluation': {'compute_structure_metrics': True, 'save_predictions': True},
-                'test_mode': True
+                'evaluation': {'compute_structure_metrics': True, 'save_predictions': True}
             }
         }
         
@@ -295,7 +301,7 @@ class TrainingConfig:
             self.use_data_parallel = multi_gpu_config.get('use_data_parallel', self.use_data_parallel)
             self.gpu_ids = multi_gpu_config.get('gpu_ids', self.gpu_ids)
         
-        # 加载交叉验证配置
+                # 加载交叉验证配置
         if 'cross_validation' in config_data:
             cv_config = config_data['cross_validation']
             self.fold = cv_config.get('fold', self.fold)
@@ -664,9 +670,7 @@ class DiffoldTrainer:
         )
         
         for batch_idx, batch in progress_bar:
-            if self.config.test_mode and batch_idx >= max_batches:
-                break
-            
+
             # 在测试模式下输出样本名称
             if self.config.test_mode and self.local_rank == 0:
                 sample_names = batch.get('names', ['unknown'])
@@ -1014,179 +1018,32 @@ class DiffoldTrainer:
                 old_file.unlink()
                 logger.debug(f"删除旧检查点: {old_file}")
     
-    def modify_learning_rate(self, new_lr: float, reason: str = "Manual adjustment", force_scheduler_reset: bool = True):
-        """智能修改学习率，正确处理调度器状态
-        
-        Args:
-            new_lr: 新的学习率
-            reason: 修改原因，用于日志记录
-            force_scheduler_reset: 是否强制重置调度器状态以从新学习率开始
-        """
-        # 检查是否允许运行时修改
-        if not self.config.learning_rate_modification.get('enable_runtime_modification', True):
-            logger.warning("⚠️ 运行时学习率修改已禁用")
-            return
-        
+    def modify_learning_rate(self, new_lr: float, reason: str = "Manual adjustment"):
+        """修改学习率"""
         old_lr = self.get_current_lr()
-        
-        # 验证新学习率
-        validation_checks = self.config.learning_rate_modification.get('validation_checks', {})
-        min_lr = validation_checks.get('min_lr', 1e-7)
-        max_lr = validation_checks.get('max_lr', 1e-1)
-        
-        if new_lr < min_lr:
-            logger.warning(f"⚠️ 新学习率 {new_lr:.6f} 低于最小限制 {min_lr:.6f}")
-            new_lr = min_lr
-            logger.info(f"📈 学习率已调整至最小值: {new_lr:.6f}")
-        
-        if new_lr > max_lr:
-            logger.warning(f"⚠️ 新学习率 {new_lr:.6f} 高于最大限制 {max_lr:.6f}")
-            new_lr = max_lr
-            logger.info(f"📉 学习率已调整至最大值: {new_lr:.6f}")
-        
-        # 检查大幅度变化
-        if validation_checks.get('warn_on_large_changes', True):
-            threshold = validation_checks.get('large_change_threshold', 10.0)
-            if old_lr > 0 and (new_lr / old_lr > threshold or old_lr / new_lr > threshold):
-                logger.warning(f"⚠️ 学习率变化过大: {old_lr:.6f} → {new_lr:.6f} "
-                              f"(变化倍数: {new_lr/old_lr:.2f})")
-        
-        # 检测当前调度器状态
-        scheduler_info = self._analyze_scheduler_state()
-        logger.info(f"📊 调度器状态分析: {scheduler_info}")
         
         # 应用新学习率
         if self.enhanced_optimizer:
-            # 使用增强优化器
             for param_group in self.enhanced_optimizer.optimizer.param_groups:
                 param_group['lr'] = new_lr
         else:
-            # 使用标准优化器
             for param_group in self.optimizer.param_groups:
                 param_group['lr'] = new_lr
         
-        # 智能更新调度器状态
-        if force_scheduler_reset and self.scheduler:
-            self._update_scheduler_for_new_lr(new_lr, scheduler_info)
-        
-        if self.config.learning_rate_modification.get('log_lr_changes', True):
-            logger.info(f"🔧 学习率修改: {old_lr:.6f} → {new_lr:.6f} ({reason})")
-            if force_scheduler_reset:
-                logger.info("🔄 调度器状态已同步，将从新学习率开始调度")
+        logger.info(f"🔧 学习率修改: {old_lr:.6f} → {new_lr:.6f} ({reason})")
         
         # 记录学习率修改历史
-        if self.config.learning_rate_modification.get('save_modification_history', True):
-            if not hasattr(self, 'lr_modification_history'):
-                self.lr_modification_history = []
-            
-            self.lr_modification_history.append({
-                'timestamp': time.time(),
-                'old_lr': old_lr,
-                'new_lr': new_lr,
-                'reason': reason,
-                'scheduler_info': scheduler_info,
-                'scheduler_reset': force_scheduler_reset
-            })
+        if not hasattr(self, 'lr_modification_history'):
+            self.lr_modification_history = []
+        
+        self.lr_modification_history.append({
+            'timestamp': time.time(),
+            'old_lr': old_lr,
+            'new_lr': new_lr,
+            'reason': reason
+        })
     
-    def _analyze_scheduler_state(self) -> Dict[str, Any]:
-        """分析当前调度器状态"""
-        if not self.scheduler:
-            return {'type': 'none', 'phase': 'none'}
-        
-        scheduler_type = type(self.scheduler).__name__
-        info = {
-            'type': scheduler_type,
-            'last_epoch': getattr(self.scheduler, 'last_epoch', -1),
-            'phase': 'unknown'
-        }
-        
-        # 检测预热调度器
-        if hasattr(self.scheduler, 'warmup_steps'):
-            warmup_steps = self.scheduler.warmup_steps
-            current_step = self.scheduler.last_epoch
-            
-            if current_step < warmup_steps:
-                info['phase'] = 'warmup'
-                info['warmup_progress'] = f"{current_step}/{warmup_steps}"
-            else:
-                info['phase'] = 'post_warmup'
-                info['post_warmup_steps'] = current_step - warmup_steps
-            
-            info['warmup_steps'] = warmup_steps
-        
-        # 检测余弦退火调度器
-        if hasattr(self.scheduler, 'T_cur'):
-            info['T_cur'] = self.scheduler.T_cur
-            info['T_i'] = getattr(self.scheduler, 'T_i', 'unknown')
-            info['cycle'] = getattr(self.scheduler, 'cycle', 0)
-        
-        # 检测基础调度器（嵌套调度器）
-        if hasattr(self.scheduler, 'base_scheduler') and self.scheduler.base_scheduler:
-            info['has_base_scheduler'] = True
-            info['base_scheduler_type'] = type(self.scheduler.base_scheduler).__name__
-        
-        return info
-    
-    def _update_scheduler_for_new_lr(self, new_lr: float, scheduler_info: Dict[str, Any]):
-        """根据调度器类型智能更新状态"""
-        
-        # 更新基础学习率
-        if hasattr(self.scheduler, 'base_lrs'):
-            self.scheduler.base_lrs = [new_lr] * len(self.scheduler.base_lrs)
-            logger.info(f"📝 更新调度器基础学习率: {self.scheduler.base_lrs}")
-        
-        # 处理WarmupLRScheduler
-        if 'Warmup' in scheduler_info['type']:
-            if scheduler_info['phase'] == 'post_warmup':
-                # 如果已过预热期，需要更新基础调度器并重置其状态
-                if hasattr(self.scheduler, 'base_scheduler') and self.scheduler.base_scheduler:
-                    base_sched = self.scheduler.base_scheduler
-                    
-                    # 更新基础调度器的base_lrs
-                    if hasattr(base_sched, 'base_lrs'):
-                        base_sched.base_lrs = [new_lr] * len(base_sched.base_lrs)
-                        logger.info("📝 更新基础调度器的base_lrs")
-                    
-                    # 重置基础调度器的状态，使其从新学习率开始调度
-                    base_sched_type = type(base_sched).__name__
-                    if 'CosineAnnealing' in base_sched_type:
-                        # 重置余弦退火，从新学习率开始下降
-                        base_sched.last_epoch = -1  # 重新开始
-                        logger.info("🔄 重置基础余弦退火调度器，将从新学习率开始下降")
-                    elif 'Plateau' in base_sched_type:
-                        # 重置plateau计数器
-                        if hasattr(base_sched, 'num_bad_epochs'):
-                            base_sched.num_bad_epochs = 0
-                        if hasattr(base_sched, 'best'):
-                            base_sched.best = float('inf')
-                        logger.info("🔄 重置ReduceLROnPlateau状态")
-                else:
-                    logger.info("📝 预热已结束，但没有基础调度器，学习率将保持恒定")
-            else:
-                # 在预热阶段，更新预热的目标学习率
-                logger.info(f"📝 当前在预热阶段 ({scheduler_info.get('warmup_progress', 'unknown')})，"
-                           f"调度器将在预热结束后达到新的目标学习率 {new_lr:.6f}")
-        
-        # 处理CosineAnnealingWarmRestarts
-        elif 'CosineAnnealing' in scheduler_info['type']:
-            # 重置当前周期，从新学习率开始下一个退火周期
-            if hasattr(self.scheduler, 'T_cur'):
-                logger.info(f"🔄 重置余弦退火周期，当前T_cur: {self.scheduler.T_cur} → 0")
-                self.scheduler.T_cur = 0
-        
-        # 处理ReduceLROnPlateau
-        elif 'Plateau' in scheduler_info['type']:
-            # 重置patience计数器
-            if hasattr(self.scheduler, 'num_bad_epochs'):
-                self.scheduler.num_bad_epochs = 0
-                logger.info("🔄 重置ReduceLROnPlateau的patience计数器")
-        
-        # 处理增强优化器中的调度器
-        if self.enhanced_optimizer and hasattr(self.enhanced_optimizer, 'scheduler'):
-            enhanced_scheduler = self.enhanced_optimizer.scheduler
-            if enhanced_scheduler and hasattr(enhanced_scheduler, 'base_lrs'):
-                enhanced_scheduler.base_lrs = [new_lr] * len(enhanced_scheduler.base_lrs)
-                logger.info("📝 更新增强优化器调度器的base_lrs")
+
     
     def get_current_lr(self) -> float:
         """获取当前学习率"""
@@ -1196,97 +1053,61 @@ class DiffoldTrainer:
             return self.optimizer.param_groups[0]['lr']
     
     def modify_lr_schedule(self, new_schedule_config: Dict[str, Any]):
-        """修改学习率调度策略
-        
-        Args:
-            new_schedule_config: 新的调度器配置
-        """
+        """修改学习率调度策略"""
         logger.info("🔄 重新配置学习率调度器...")
         
-        if self.enhanced_optimizer:
-            # 重新创建调度器
-            old_scheduler = self.scheduler
-            self.enhanced_optimizer.scheduler = self.enhanced_optimizer._create_scheduler(new_schedule_config)
-            self.scheduler = self.enhanced_optimizer.scheduler
-            
-            if old_scheduler and hasattr(old_scheduler, 'last_epoch'):
-                # 保持当前的调度器状态
-                if self.scheduler and hasattr(self.scheduler, 'last_epoch'):
-                    self.scheduler.last_epoch = old_scheduler.last_epoch
-            
-            logger.info(f"✅ 增强优化器调度器已更新: {new_schedule_config.get('type', 'unknown')}")
-        else:
-            # 为标准优化器重新创建调度器
-            scheduler_type = new_schedule_config.get('type', 'cosine')
-            
-            if scheduler_type == "cosine":
-                self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                    self.optimizer, 
-                    T_max=new_schedule_config.get('T_max', self.config.num_epochs), 
-                    eta_min=new_schedule_config.get('eta_min', 1e-6)
-                )
-            elif scheduler_type == "plateau":
-                self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                    self.optimizer, 
-                    mode='min', 
-                    factor=new_schedule_config.get('factor', 0.5), 
-                    patience=new_schedule_config.get('patience', 10), 
-                    verbose=True
-                )
-            else:
-                self.scheduler = None
-            
-            logger.info(f"✅ 标准调度器已更新: {scheduler_type}")
-
-    def load_checkpoint(self, checkpoint_path: str, 
-                       skip_optimizer_state: bool = False,
-                       skip_scheduler_state: bool = False) -> int:
-        """加载检查点
+        scheduler_type = new_schedule_config.get('type', 'cosine')
         
-        Args:
-            checkpoint_path: 检查点文件路径
-            skip_optimizer_state: 是否跳过优化器状态加载（用于学习率修改）
-            skip_scheduler_state: 是否跳过调度器状态加载（用于调度器修改）
-        """
+        if scheduler_type == "cosine":
+            self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                self.optimizer, 
+                T_max=new_schedule_config.get('T_max', self.config.num_epochs), 
+                eta_min=new_schedule_config.get('eta_min', 1e-6)
+            )
+        elif scheduler_type == "plateau":
+            self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                self.optimizer, 
+                mode='min', 
+                factor=new_schedule_config.get('factor', 0.5), 
+                patience=new_schedule_config.get('patience', 10), 
+                verbose=True
+            )
+        else:
+            self.scheduler = None
+        
+        logger.info(f"✅ 调度器已更新: {scheduler_type}")
+
+    def load_checkpoint(self, checkpoint_path: str) -> int:
+        """加载检查点"""
         checkpoint_path = Path(checkpoint_path)
         if not checkpoint_path.exists():
             logger.warning(f"检查点文件不存在: {checkpoint_path}")
             return 0
         
         logger.info(f"加载检查点: {checkpoint_path}")
-        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
-        self.checkpoint_data = checkpoint  # 保存检查点数据供调度器使用
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
         
-        # 加载模型状态（处理DataParallel）
+        # 加载模型状态
         model_state_dict = checkpoint['model_state_dict']
         if self.using_ddp:
             self.model.module.load_state_dict(model_state_dict)
         else:
             self.model.load_state_dict(model_state_dict)
         
-        # 加载优化器状态（可选跳过）
-        if not skip_optimizer_state:
-            try:
-                self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-                logger.info("✅ 优化器状态加载成功")
-            except Exception as e:
-                logger.warning(f"⚠️ 优化器状态加载失败: {e}")
-                logger.info("继续使用当前优化器配置")
-        else:
-            logger.info("🔄 跳过优化器状态加载（准备修改学习率）")
+        # 加载优化器状态
+        try:
+            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            logger.info("✅ 优化器状态加载成功")
+        except Exception as e:
+            logger.warning(f"⚠️ 优化器状态加载失败: {e}")
         
-        # 加载调度器状态（可选跳过）
-        if not skip_scheduler_state and self.scheduler and checkpoint.get('scheduler_state_dict'):
+        # 加载调度器状态
+        if self.scheduler and checkpoint.get('scheduler_state_dict'):
             try:
                 self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-                logger.info("✅ 学习率调度器状态加载成功")
+                logger.info("✅ 调度器状态加载成功")
             except Exception as e:
                 logger.warning(f"⚠️ 调度器状态加载失败: {e}")
-                logger.info("使用当前调度器配置继续训练")
-        elif skip_scheduler_state:
-            logger.info("🔄 跳过调度器状态加载（准备修改调度策略）")
-        else:
-            logger.info("📝 没有调度器状态需要加载")
         
         # 加载GradScaler状态
         if self.scaler and checkpoint.get('scaler_state_dict'):
@@ -1295,7 +1116,6 @@ class DiffoldTrainer:
                 logger.info("✅ GradScaler状态加载成功")
             except Exception as e:
                 logger.warning(f"⚠️ GradScaler状态加载失败: {e}")
-                logger.info("使用默认GradScaler配置")
         
         # 恢复训练指标
         if 'metrics' in checkpoint:
@@ -1304,26 +1124,12 @@ class DiffoldTrainer:
             self.metrics.valid_losses = metrics_dict.get('valid_losses', [])
             self.metrics.learning_rates = metrics_dict.get('learning_rates', [])
             self.metrics.epoch_times = metrics_dict.get('epoch_times', [])
-            # 恢复step-based指标
             self.metrics.step_losses = metrics_dict.get('step_losses', [])
             self.metrics.step_learning_rates = metrics_dict.get('step_learning_rates', [])
             self.metrics.steps = metrics_dict.get('steps', [])
             self.metrics.best_valid_loss = metrics_dict.get('best_valid_loss', float('inf'))
             self.metrics.best_epoch = metrics_dict.get('best_epoch', 0)
             self.metrics.early_stopping_counter = metrics_dict.get('early_stopping_counter', 0)
-        
-        # 恢复增强优化器状态（如果存在）
-        if self.enhanced_optimizer and checkpoint.get('enhanced_optimizer_stats'):
-            try:
-                self.enhanced_optimizer.load_stats(checkpoint['enhanced_optimizer_stats'])
-                logger.info("✅ 增强优化器统计数据加载成功")
-            except Exception as e:
-                logger.warning(f"⚠️ 增强优化器统计数据加载失败: {e}")
-        
-        # 恢复学习率修改历史（如果存在）
-        if 'lr_modification_history' in checkpoint:
-            self.lr_modification_history = checkpoint['lr_modification_history']
-            logger.info(f"✅ 学习率修改历史已恢复 ({len(self.lr_modification_history)} 条记录)")
         
         start_epoch = checkpoint['epoch'] + 1
         current_lr = self.get_current_lr()
@@ -1393,11 +1199,7 @@ class DiffoldTrainer:
         
         logger.info(f"Saved training curves: {plot_path}")
     
-    def train(self, resume_from: Optional[str] = None, 
-              modify_lr: Optional[float] = None,
-              lr_schedule_override: Optional[str] = None,
-              reset_lr_history: bool = False,
-              keep_scheduler_progress: bool = False):
+    def train(self, resume_from: Optional[str] = None):
         """主训练循环"""
         if self.is_main_process:
             logger.info("🚀 开始训练...")
@@ -1423,45 +1225,7 @@ class DiffoldTrainer:
         # 加载检查点（如果指定）
         start_epoch = 0
         if resume_from:
-            # 判断是否需要跳过优化器/调度器状态加载
-            skip_optimizer = modify_lr is not None
-            skip_scheduler = lr_schedule_override is not None or (modify_lr is not None and not keep_scheduler_progress)
-            
-            if skip_optimizer or skip_scheduler:
-                logger.info("🔄 智能加载模式:")
-                if skip_optimizer:
-                    logger.info("  - 跳过优化器状态加载（准备修改学习率）")
-                if skip_scheduler:
-                    logger.info("  - 跳过调度器状态加载（准备重置调度策略）")
-            
-            start_epoch = self.load_checkpoint(
-                resume_from, 
-                skip_optimizer_state=skip_optimizer,
-                skip_scheduler_state=skip_scheduler
-            )
-            
-            # 在跳过状态加载后处理学习率修改选项
-            if modify_lr is not None:
-                self.modify_learning_rate(
-                    modify_lr, 
-                    "Command line override after resume",
-                    force_scheduler_reset=not keep_scheduler_progress
-                )
-            
-            if lr_schedule_override is not None:
-                # 构建新的调度器配置
-                new_schedule_config = {
-                    'type': lr_schedule_override,
-                    'T_max': self.config.num_epochs * len(self.train_loader),
-                    'eta_min': 1e-6,
-                    'warmup_steps': self.config.warmup_steps,
-                    'patience': self.config.patience
-                }
-                self.modify_lr_schedule(new_schedule_config)
-            
-            if reset_lr_history:
-                self.lr_modification_history = []
-                logger.info("🗑️ 学习率修改历史已重置")
+            start_epoch = self.load_checkpoint(resume_from)
         
         # 训练循环
         num_epochs = self.config.test_epochs if self.config.test_mode else self.config.num_epochs
@@ -1570,19 +1334,7 @@ class DiffoldTrainer:
             estimated_remaining_time = remaining_epochs * avg_epoch_time
             estimated_completion_time = current_time + estimated_remaining_time
             
-            # 格式化时间显示
-            def format_time(seconds):
-                if seconds < 60:
-                    return f"{seconds:.1f}秒"
-                elif seconds < 3600:
-                    minutes = seconds / 60
-                    return f"{minutes:.1f}分钟"
-                else:
-                    hours = seconds / 3600
-                    return f"{hours:.1f}小时"
-            
-            def format_datetime(timestamp):
-                return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+
             
             # 美化Epoch结果输出
             if self.is_main_process:
@@ -1665,148 +1417,7 @@ class DiffoldTrainer:
             dist.destroy_process_group()
 
 
-def run_small_scale_test(fixed_sample_name=None):
-    """运行小规模测试 - 包含多GPU环境测试，可指定固定样本"""
-    logger.info("🧪 启动多GPU环境小规模测试...")
-    
-    # 基础测试配置
-    config = TrainingConfig()
-    config.test_mode = True
-    config.test_epochs = 2  # 测试2轮，验证完整流程
-    config.test_samples = 1  # 稍微增加样本数测试批次处理
-    config.max_sequence_length = 20
-    config.num_workers = 2   # 测试数据加载
-    config.output_dir = "./test_output"
-    config.checkpoint_dir = "./test_checkpoints"
-    
-    # 🔍 GPU环境检测和配置
-    gpu_count = torch.cuda.device_count()
-    
-    logger.info(f"🖥️  将使用 {gpu_count} 个GPU进行测试")
-    
-    if gpu_count == 0:
-        logger.warning("⚠️  未检测到GPU，使用CPU模式")
-        config.device = "cpu"
-        config.batch_size = 1
-        config.mixed_precision = False
-        config.use_data_parallel = False
-    elif gpu_count == 1:
-        logger.info("📱 单GPU模式测试")
-        config.device = "cuda"
-        config.batch_size = 1
-        config.mixed_precision = True
-        config.use_data_parallel = False
-    else:
-        logger.info(f"🚀 多GPU模式测试 ({gpu_count} GPUs)")
-        config.device = "cuda"
-        config.batch_size = 1
-        config.mixed_precision = True
-        config.use_data_parallel = True
-        
-        # 显示GPU信息
-        for i in range(gpu_count):
-            gpu_name = torch.cuda.get_device_name(i)
-            gpu_memory = torch.cuda.get_device_properties(i).total_memory / 1e9
-            logger.info(f"   GPU {i}: {gpu_name} ({gpu_memory:.1f}GB)")
-    
-    # 🔥 启用增强功能进行测试
-    if ENHANCED_FEATURES_AVAILABLE:
-        config.apply_enhanced_preset('debug')
-        logger.info("✅ 增强功能已启用用于测试")
-    
-    # 📊 测试步骤
-    test_results = {
-        'gpu_count': gpu_count,
-        'config': config.device,
-        'batch_size': config.batch_size,
-        'steps': []
-    }
-    
-    try:
-        # ========== 新增：只用特定样本 ===========
-        fixed_train_loader = None
-        fixed_valid_loader = None
-        if fixed_sample_name is not None:
-            logger.info(f"🔒 仅使用指定样本进行测试: {fixed_sample_name}")
-            from diffold.dataloader import RNA3DDataset, collate_fn
-            dataset = RNA3DDataset(
-                data_dir=config.data_dir,
-                fold=0,
-                split="train",
-                max_length=config.max_sequence_length,
-                use_msa=config.use_msa,
-                cache_dir=None,
-                force_reload=False,
-                enable_missing_atom_mask=True
-            )
-            sample = dataset.get_sample_by_name(fixed_sample_name)
-            if sample is None:
-                raise RuntimeError(f"未找到指定样本: {fixed_sample_name}")
-            # 构造只包含该样本的 DataLoader
-            from torch.utils.data import DataLoader
-            fixed_dataset = [sample]
-            fixed_train_loader = DataLoader(fixed_dataset, batch_size=1, collate_fn=collate_fn)
-            fixed_valid_loader = fixed_train_loader  # 验证也用同一个
-            logger.info(f"✅ 已构造只包含样本 {fixed_sample_name} 的DataLoader")
-        # ========== 新增结束 ===========
 
-        trainer = DiffoldTrainer(config)
-        test_results['steps'].append('✅ 模型初始化成功')
-        logger.info("✅ 模型初始化成功")
-        
-        # 如果指定了固定样本，替换trainer的数据加载器
-        if fixed_train_loader is not None:
-            trainer.train_loader = fixed_train_loader
-            trainer.valid_loader = fixed_valid_loader
-            logger.info(f"✅ 训练/验证均只用样本: {fixed_sample_name}")
-        
-        # 测试模型设备分布
-        if hasattr(trainer.model, 'module'):
-            model_devices = set()
-            for param in trainer.model.module.parameters():
-                model_devices.add(param.device)
-            logger.info(f"📍 模型参数分布在设备: {model_devices}")
-        
-        logger.info("🧪 完整训练流程测试")
-        
-        # 运行完整训练流程
-        trainer.train()
-        test_results['steps'].append('✅ 完整训练流程成功')
-        
-        logger.info("=" * 60)
-        logger.info("🎉 多GPU环境测试完成!")
-        logger.info("📊 测试结果总结:")
-        logger.info(f"   🖥️  GPU数量: {test_results['gpu_count']}")
-        logger.info(f"   ⚙️  配置: {test_results['config']}")
-        logger.info(f"   📦 批次大小: {test_results['batch_size']}")
-        logger.info("   📋 完成步骤:")
-        for step in test_results['steps']:
-            logger.info(f"      {step}")
-        
-        logger.info(f"📁 测试输出: {config.output_dir}")
-        logger.info(f"📁 测试检查点: {config.checkpoint_dir}")
-        
-        # 🧹 清理测试文件（可选）
-        cleanup_choice = input("\n🧹 是否清理测试文件? (y/n): ").lower().strip()
-        if cleanup_choice == 'y':
-            import shutil
-            import os
-            if os.path.exists(config.output_dir):
-                shutil.rmtree(config.output_dir)
-                logger.info(f"🗑️  已删除: {config.output_dir}")
-            if os.path.exists(config.checkpoint_dir):
-                shutil.rmtree(config.checkpoint_dir)
-                logger.info(f"🗑️  已删除: {config.checkpoint_dir}")
-        
-        logger.info("✅ 测试完成，环境准备就绪！")
-        
-    except Exception as e:
-        logger.error(f"❌ 多GPU测试失败: {e}")
-        logger.error("📋 失败信息:")
-        import traceback
-        traceback.print_exc()
-    
-    exit()
 
 def main():
     """主函数"""
@@ -1875,14 +1486,6 @@ def main():
     parser.add_argument("--resume", type=str, default=None, help="从检查点恢复训练")
     parser.add_argument("--test", action="store_true", help="运行多GPU环境小规模测试")
     parser.add_argument("--fixed_sample_name", type=str, default=None, help="指定用于测试的固定样本名称")
-    
-    # 学习率修改参数
-    parser.add_argument("--modify_lr", type=float, default=None, help="在恢复训练时修改学习率")
-    parser.add_argument("--lr_schedule_override", type=str, default=None, 
-                       help="覆盖调度器类型 (cosine/plateau/warmup_cosine/warmup_cosine_restarts)")
-    parser.add_argument("--reset_lr_history", action="store_true", help="重置学习率修改历史")
-    parser.add_argument("--keep_scheduler_progress", action="store_true", 
-                       help="保持调度器当前进度，不重置调度器状态（默认会重置以从新学习率开始）")
 
     
     args = parser.parse_args()
@@ -1987,10 +1590,9 @@ def main():
         return
     
     # 🔥 应用增强功能设置
-    if args.disable_enhanced or not ENHANCED_FEATURES_AVAILABLE:
+    if args.disable_enhanced:
         config.enhanced_features['enable_enhanced_training'] = False
-        if args.disable_enhanced:
-            logger.warning("⚠️ 增强功能已手动禁用")
+        logger.warning("⚠️ 增强功能已手动禁用")
     else:
         # 应用预设
         if args.enhanced_preset:
@@ -2100,36 +1702,154 @@ def main():
     # 创建训练器
     trainer = DiffoldTrainer(config, local_rank=local_rank, world_size=world_size)
     
-    # 处理学习率修改参数（仅在恢复训练时有效）
-    if args.modify_lr is not None:
-        if args.resume:
-            logger.info(f"🔧 准备在恢复训练后修改学习率至: {args.modify_lr}")
-        else:
-            logger.warning("--modify_lr 仅在使用 --resume 时有效")
-    
-    if args.lr_schedule_override is not None:
-        if args.resume:
-            logger.info(f"🔄 准备在恢复训练后修改调度器至: {args.lr_schedule_override}")
-        else:
-            logger.warning("--lr_schedule_override 仅在使用 --resume 时有效")
-    
-    if args.reset_lr_history:
-        if args.resume:
-            logger.info("🗑️ 准备重置学习率修改历史")
-        else:
-            logger.warning("--reset_lr_history 仅在使用 --resume 时有效")
-    
-    # 开始训练（传递学习率修改参数）
-    trainer.train(
-        resume_from=args.resume,
-        modify_lr=args.modify_lr if args.resume else None,
-        lr_schedule_override=args.lr_schedule_override if args.resume else None,
-        reset_lr_history=args.reset_lr_history if args.resume else False,
-        keep_scheduler_progress=args.keep_scheduler_progress if args.resume else False
-    )
+    # 开始训练
+    trainer.train(resume_from=args.resume)
     # DDP结束
     if world_size > 1:
         dist.destroy_process_group()
+
+
+def run_small_scale_test(fixed_sample_name=None):
+    """运行小规模测试 - 包含多GPU环境测试，可指定固定样本"""
+    logger.info("🧪 启动多GPU环境小规模测试...")
+    
+    # 基础测试配置
+    config = TrainingConfig()
+    config.test_mode = True
+    config.test_epochs = 2  # 测试2轮，验证完整流程
+    config.test_samples = 1  # 稍微增加样本数测试批次处理
+    config.max_sequence_length = 20
+    config.num_workers = 2   # 测试数据加载
+    config.output_dir = "./test_output"
+    config.checkpoint_dir = "./test_checkpoints"
+    
+    # 🔍 GPU环境检测和配置
+    gpu_count = torch.cuda.device_count()
+    
+    logger.info(f"🖥️  将使用 {gpu_count} 个GPU进行测试")
+    
+    if gpu_count == 0:
+        logger.warning("⚠️  未检测到GPU，使用CPU模式")
+        config.device = "cpu"
+        config.batch_size = 1
+        config.mixed_precision = False
+        config.use_data_parallel = False
+    elif gpu_count == 1:
+        logger.info("📱 单GPU模式测试")
+        config.device = "cuda"
+        config.batch_size = 1
+        config.mixed_precision = True
+        config.use_data_parallel = False
+    else:
+        logger.info(f"🚀 多GPU模式测试 ({gpu_count} GPUs)")
+        config.device = "cuda"
+        config.batch_size = 1
+        config.mixed_precision = True
+        config.use_data_parallel = True
+        
+        # 显示GPU信息
+        for i in range(gpu_count):
+            gpu_name = torch.cuda.get_device_name(i)
+            gpu_memory = torch.cuda.get_device_properties(i).total_memory / 1e9
+            logger.info(f"   GPU {i}: {gpu_name} ({gpu_memory:.1f}GB)")
+    
+    # 🔥 启用增强功能进行测试
+    config.apply_enhanced_preset('debug')
+    logger.info("✅ 增强功能已启用用于测试")
+    
+    # 📊 测试步骤
+    test_results = {
+        'gpu_count': gpu_count,
+        'config': config.device,
+        'batch_size': config.batch_size,
+        'steps': []
+    }
+    
+    try:
+        # ========== 新增：只用特定样本 ===========
+        fixed_train_loader = None
+        fixed_valid_loader = None
+        if fixed_sample_name is not None:
+            logger.info(f"🔒 仅使用指定样本进行测试: {fixed_sample_name}")
+            from diffold.dataloader import RNA3DDataset, collate_fn
+            dataset = RNA3DDataset(
+                data_dir=config.data_dir,
+                fold=0,
+                split="train",
+                max_length=config.max_sequence_length,
+                use_msa=config.use_msa,
+                cache_dir=None,
+                force_reload=False,
+                enable_missing_atom_mask=True
+            )
+            sample = dataset.get_sample_by_name(fixed_sample_name)
+            if sample is None:
+                raise RuntimeError(f"未找到指定样本: {fixed_sample_name}")
+            # 构造只包含该样本的 DataLoader
+            from torch.utils.data import DataLoader
+            fixed_dataset = [sample]
+            fixed_train_loader = DataLoader(fixed_dataset, batch_size=1, collate_fn=collate_fn)
+            fixed_valid_loader = fixed_train_loader  # 验证也用同一个
+            logger.info(f"✅ 已构造只包含样本 {fixed_sample_name} 的DataLoader")
+        # ========== 新增结束 ===========
+
+        trainer = DiffoldTrainer(config)
+        test_results['steps'].append('✅ 模型初始化成功')
+        logger.info("✅ 模型初始化成功")
+        
+        # 如果指定了固定样本，替换trainer的数据加载器
+        if fixed_train_loader is not None:
+            trainer.train_loader = fixed_train_loader
+            trainer.valid_loader = fixed_valid_loader
+            logger.info(f"✅ 训练/验证均只用样本: {fixed_sample_name}")
+        
+        # 测试模型设备分布
+        if hasattr(trainer.model, 'module'):
+            model_devices = set()
+            for param in trainer.model.module.parameters():
+                model_devices.add(param.device)
+            logger.info(f"📍 模型参数分布在设备: {model_devices}")
+        
+        logger.info("🧪 完整训练流程测试")
+        
+        # 运行完整训练流程
+        trainer.train()
+        test_results['steps'].append('✅ 完整训练流程成功')
+        
+        logger.info("=" * 60)
+        logger.info("🎉 多GPU环境测试完成!")
+        logger.info("📊 测试结果总结:")
+        logger.info(f"   🖥️  GPU数量: {test_results['gpu_count']}")
+        logger.info(f"   ⚙️  配置: {test_results['config']}")
+        logger.info(f"   📦 批次大小: {test_results['batch_size']}")
+        logger.info("   📋 完成步骤:")
+        for step in test_results['steps']:
+            logger.info(f"      {step}")
+        
+        logger.info(f"📁 测试输出: {config.output_dir}")
+        logger.info(f"📁 测试检查点: {config.checkpoint_dir}")
+        
+        # 🧹 清理测试文件（可选）
+        cleanup_choice = input("\n🧹 是否清理测试文件? (y/n): ").lower().strip()
+        if cleanup_choice == 'y':
+            import shutil
+            import os
+            if os.path.exists(config.output_dir):
+                shutil.rmtree(config.output_dir)
+                logger.info(f"🗑️  已删除: {config.output_dir}")
+            if os.path.exists(config.checkpoint_dir):
+                shutil.rmtree(config.checkpoint_dir)
+                logger.info(f"🗑️  已删除: {config.checkpoint_dir}")
+        
+        logger.info("✅ 测试完成，环境准备就绪！")
+        
+    except Exception as e:
+        logger.error(f"❌ 多GPU测试失败: {e}")
+        logger.error("📋 失败信息:")
+        import traceback
+        traceback.print_exc()
+    
+    exit()
 
 
 if __name__ == "__main__":
