@@ -455,20 +455,20 @@ class DiffoldTrainer:
         # 初始化数据加载器
         self.setup_data_loaders()
         
-        # 初始化优化器和调度器
-        self.setup_optimizer_and_scheduler()
-        
-        # 初始化tensorboard
-        if self.is_main_process:
-            self.writer = SummaryWriter(log_dir=str(self.config.output_dir) + "/tensorboard")
-        
-        # 混合精度训练
+        # 混合精度训练 - 需要在优化器设置之前初始化
         if self.config.mixed_precision and self.device.type == 'cuda':
             self.scaler = torch.cuda.amp.GradScaler()
             if self.is_main_process:
                 logger.info("启用混合精度训练")
         else:
             self.scaler = None
+        
+        # 初始化优化器和调度器
+        self.setup_optimizer_and_scheduler()
+        
+        # 初始化tensorboard
+        if self.is_main_process:
+            self.writer = SummaryWriter(log_dir=str(self.config.output_dir) + "/tensorboard")
         
         # 记录开始时间
         self.start_time = time.time()
