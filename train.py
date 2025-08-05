@@ -602,7 +602,8 @@ class DiffoldTrainer:
                     'eta_min': 1e-6
                 },
                 gradient_accumulation_steps=self.config.enhanced_features['optimizer']['gradient_accumulation_steps'],
-                max_grad_norm=self.config.grad_clip_norm
+                max_grad_norm=self.config.grad_clip_norm,
+                scaler=self.scaler  # 传递scaler以支持混合精度训练
             )
             
             # 包装原接口

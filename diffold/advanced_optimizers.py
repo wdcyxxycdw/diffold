@@ -144,7 +144,7 @@ class CosineAnnealingWarmRestarts(_LRScheduler):
 
 class AdaptiveOptimizer:
     """自适应优化器包装器"""
-    
+
     def __init__(self, 
                  model: nn.Module,
                  optimizer_name: str = "adamw",
@@ -152,20 +152,25 @@ class AdaptiveOptimizer:
                  weight_decay: float = 1e-5,
                  scheduler_config: Dict[str, Any] = None,
                  gradient_accumulation_steps: int = 1,
-                 max_grad_norm: float = 1.0):
+                 max_grad_norm: float = 1.0,
+                 scaler: Optional[torch.cuda.amp.GradScaler] = None):
         """
+        初始化自适应优化器
+        
         Args:
-            model: 要优化的模型
-            optimizer_name: 优化器名称 ("adamw", "adam", "sgd", "lion")
+            model: 模型
+            optimizer_name: 优化器名称
             learning_rate: 学习率
             weight_decay: 权重衰减
             scheduler_config: 调度器配置
             gradient_accumulation_steps: 梯度累积步数
-            max_grad_norm: 最大梯度范数
+            max_grad_norm: 最大梯度范数（梯度裁剪）
+            scaler: 混合精度训练的GradScaler
         """
         self.model = model
         self.gradient_accumulation_steps = gradient_accumulation_steps
         self.max_grad_norm = max_grad_norm
+        self.scaler = scaler
         self.accumulated_steps = 0
         
         # 获取可训练参数
@@ -306,6 +311,10 @@ class AdaptiveOptimizer:
         
         # 梯度裁剪
         if self.max_grad_norm > 0:
+            # 在混合精度训练中，需要先unscale梯度
+            if self.scaler is not None:
+                self.scaler.unscale_(self.optimizer)
+            
             if hasattr(self.model, 'get_trainable_parameters'):
                 torch.nn.utils.clip_grad_norm_(
                     self.model.get_trainable_parameters(), 
@@ -318,7 +327,14 @@ class AdaptiveOptimizer:
                 )
         
         # 优化器步骤
-        self.optimizer.step()
+        if self.scaler is not None:
+            # 混合精度训练：通过scaler执行优化器步骤
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+        else:
+            # 标准训练：直接执行优化器步骤
+            self.optimizer.step()
+        
         self.stats['update_count'] += 1
         
         # 调度器步骤（对于step-based调度器）
