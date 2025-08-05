@@ -22,7 +22,7 @@ from rhofold.relax.relax import AmberRelaxation
 from rhofold.utils.alphabet import get_features
 
 # 导入PDB转换功能
-from diffold.diffold_to_pdb import diffold_coords_to_pdb, validate_diffold_output
+from diffold.output import diffold_coords_to_pdb, validate_diffold_output
 
 @torch.no_grad()
 def main(config):
