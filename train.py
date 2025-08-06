@@ -1123,7 +1123,7 @@ class DiffoldTrainer:
             return 0
         
         logger.info(f"加载检查点: {checkpoint_path}")
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
         
         # 加载模型状态
         model_state_dict = checkpoint['model_state_dict']

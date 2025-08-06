@@ -231,6 +231,7 @@ class Diffold(nn.Module):
             enable_logging=True,
             strict_mode=True  # 在生产环境中可以设为True
         )
+        self.mask_validator_on = False
         
     def _compute_confidence_loss(self, single_fea, single_inputs, pair_fea, denoised_atom_pos, atom_feats,
                                 atom_pos_ground_truth, molecule_atom_indices, molecule_atom_lens,
@@ -700,8 +701,8 @@ class Diffold(nn.Module):
             logger.debug(f"计算损失 - 模式: {'训练' if self.training else '验证'}")
             
             # 🔍 验证batch数据一致性（在训练模式下）
-            if self.training and hasattr(self, 'mask_validator') and missing_atom_mask is not None:
-                try:
+            if self.mask_validator_on and self.training and hasattr(self, 'mask_validator') and missing_atom_mask is not None:
+                try: 
                     # 只有在有必要数据时才进行验证
                     if target_coords is not None and seq is not None:
                         batch_validation = self.mask_validator.validate_batch_consistency(
