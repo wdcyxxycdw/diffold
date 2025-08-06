@@ -88,44 +88,6 @@ class RNAEvaluationMetrics:
             logger.warning(f"RNA结构指标计算失败: {e}")
     
     def _compute_rmsd(self, 
-                     pred_coords: torch.Tensor, 
-                     target_coords: torch.Tensor) -> torch.Tensor:
-        """计算结构对齐后的RMSD (使用Kabsch算法)"""
-        # 确保坐标形状匹配
-        if pred_coords.shape != target_coords.shape:
-            min_len = min(pred_coords.shape[1], target_coords.shape[1])
-            pred_coords = pred_coords[:, :min_len]
-            target_coords = target_coords[:, :min_len]
-        
-        # 检查坐标维度和有效性
-        if pred_coords.dim() != 3 or target_coords.dim() != 3:
-            logger.warning(f"坐标维度错误: pred {pred_coords.shape}, target {target_coords.shape}")
-            # 回退到原始计算
-            diff = pred_coords - target_coords
-            squared_diff = torch.sum(diff ** 2, dim=-1)
-            return torch.sqrt(torch.mean(squared_diff, dim=-1))
-        
-        if pred_coords.shape[-1] != 3 or target_coords.shape[-1] != 3:
-            logger.warning(f"坐标不是3D: pred {pred_coords.shape}, target {target_coords.shape}")
-            # 回退到原始计算
-            diff = pred_coords - target_coords
-            squared_diff = torch.sum(diff ** 2, dim=-1)
-            return torch.sqrt(torch.mean(squared_diff, dim=-1))
-        
-        # 快速检查：如果坐标完全相同，直接返回0
-        if torch.allclose(pred_coords, target_coords, atol=1e-6):
-            return torch.zeros(pred_coords.shape[0], device=pred_coords.device)
-        
-        try:
-            return self._compute_aligned_rmsd_kabsch(pred_coords, target_coords)
-        except Exception as e:
-            logger.warning(f"Kabsch对齐失败，使用未对齐RMSD: {e}")
-            # 回退到原始计算
-            diff = pred_coords - target_coords
-            squared_diff = torch.sum(diff ** 2, dim=-1)
-            return torch.sqrt(torch.mean(squared_diff, dim=-1))
-    
-    def _compute_aligned_rmsd_kabsch(self, 
                                    pred_coords: torch.Tensor, 
                                    target_coords: torch.Tensor) -> torch.Tensor:
         """使用标准Kabsch算法计算对齐后的RMSD
@@ -140,13 +102,8 @@ class RNAEvaluationMetrics:
         Returns:
             rmsd: [batch_size] 每个样本的对齐RMSD
         """
-        batch_size, n_atoms, _ = pred_coords.shape
-        device = pred_coords.device
-        
-        # 快速检查：如果坐标完全相同，直接返回0
-        if torch.allclose(pred_coords, target_coords, atol=1e-6):
-            return torch.zeros(batch_size, device=device)
-        
+        batch_size=pred_coords.shape[0]
+
         # 1. 质心对齐
         pred_centroid = torch.mean(pred_coords, dim=1, keepdim=True)  # [B, 1, 3]
         target_centroid = torch.mean(target_coords, dim=1, keepdim=True)  # [B, 1, 3]
@@ -158,39 +115,28 @@ class RNAEvaluationMetrics:
         H = torch.bmm(pred_centered.transpose(-2, -1), target_centered)  # [B, 3, 3]
         
         # 3. SVD分解: H = U @ S @ V^T
-        try:
-            # 使用稳定的SVD分解
-            U, S, Vt = torch.linalg.svd(H) if hasattr(torch.linalg, 'svd') else torch.svd(H)
-        except Exception as e:
-            logger.warning(f"SVD分解失败: {e}")
-            # 回退到未对齐RMSD
-            diff = pred_coords - target_coords
-            return torch.sqrt(torch.mean(torch.sum(diff ** 2, dim=-1), dim=-1))
+        U, _, Vt = torch.linalg.svd(H, full_matrices=False)
         
         # 4. 计算旋转矩阵 R = V @ U^T
         # 注意：这里V是Vt的转置
+        Ut = U.transpose(-2, -1)
         V = Vt.transpose(-2, -1)  # [B, 3, 3]
-        R = torch.bmm(U, Vt)  # [B, 3, 3]
         
         # 5. 处理反射情况：确保det(R) = +1（右手系）
-        det_R = torch.det(R)  # [B]
-        
         # 对于det(R) < 0的情况，修正V的最后一列
-        det_R = torch.det(R)
-        neg_mask = det_R < 0
-        if neg_mask.any():
-            # 在 U 的最后一列乘 -1 再重算 R
-            U_fix = U.clone()
-            U_fix[neg_mask, :, -1] *= -1
-            R[neg_mask] = torch.bmm(U_fix[neg_mask], Vt[neg_mask])
+        det_r = torch.det(torch.bmm(V, Ut))
+        d = torch.where(det_r < 0, -torch.ones_like(det_r), torch.ones_like(det_r))
+        D = torch.eye(3, device=H.device).repeat(H.size(0), 1, 1)
+        D[:, 2, 2] = d
+
+        R=torch.bmm(torch.bmm(U, D), Vt)
         
         # 6. 应用最优旋转：pred_aligned = pred_centered @ R
         pred_aligned = torch.bmm(pred_centered, R)  # [B, N, 3]
         
         # 7. 计算对齐后的RMSD
         diff = pred_aligned - target_centered  # [B, N, 3]
-        squared_distances = torch.sum(diff ** 2, dim=-1)  # [B, N]
-        rmsd = torch.sqrt(torch.mean(squared_distances, dim=-1))  # [B]
+        rmsd = torch.sqrt((diff ** 2).sum(-1).mean(-1)) # [B]
         
         # 8. 验证结果的合理性
         # 计算未对齐RMSD作为上界
@@ -211,7 +157,7 @@ class RNAEvaluationMetrics:
         """计算RNA TM-score (Template Modeling score)
         
         RNA TM-score是衡量两个RNA结构相似性的指标，范围0-1，值越高越好
-        参考Zhang Lab的RNA-align方法，使用适合RNA的归一化因子
+        使用与RMSD相同的Kabsch对齐算法，确保一致性
         
         Args:
             pred_coords: [batch_size, n_atoms, 3] 预测坐标
@@ -222,59 +168,54 @@ class RNAEvaluationMetrics:
         """
         batch_size, n_atoms, _ = pred_coords.shape
         device = pred_coords.device
-        
-        # 确保坐标形状匹配
-        if pred_coords.shape != target_coords.shape:
-            min_len = min(pred_coords.shape[1], target_coords.shape[1])
-            pred_coords = pred_coords[:, :min_len]
-            target_coords = target_coords[:, :min_len]
-            n_atoms = min_len
-        
+
         try:
-            # 1. 获取最优对齐（使用与RMSD相同的对齐方法）
-            pred_centroid = torch.mean(pred_coords, dim=1, keepdim=True)
-            target_centroid = torch.mean(target_coords, dim=1, keepdim=True)
+            # 1. 使用与RMSD相同的Kabsch对齐算法
+            # 质心对齐
+            pred_centroid = torch.mean(pred_coords, dim=1, keepdim=True)  # [B, 1, 3]
+            target_centroid = torch.mean(target_coords, dim=1, keepdim=True)  # [B, 1, 3]
             
-            pred_centered = pred_coords - pred_centroid
-            target_centered = target_coords - target_centroid
+            pred_centered = pred_coords - pred_centroid  # [B, N, 3]
+            target_centered = target_coords - target_centroid  # [B, N, 3]
             
-            # 计算旋转矩阵
-            H = torch.bmm(pred_centered.transpose(-2, -1), target_centered)
+            # 计算交叉协方差矩阵 H = pred_centered^T @ target_centered
+            H = torch.bmm(pred_centered.transpose(-2, -1), target_centered)  # [B, 3, 3]
             
-            # SVD分解获得最优旋转
-            U, S, Vt = torch.linalg.svd(H) if hasattr(torch.linalg, 'svd') else torch.svd(H)
-            V = Vt.transpose(-2, -1)
-            R = torch.bmm(U, Vt)
+            # SVD分解: H = U @ S @ V^T
+            U, _, Vt = torch.linalg.svd(H, full_matrices=False)
             
-            # 处理反射
-            det_R = torch.det(R)
-            neg_mask = det_R < 0
-            if neg_mask.any():
-                U_fix = U.clone()
-                U_fix[neg_mask, :, -1] *= -1
-                R[neg_mask] = torch.bmm(U_fix[neg_mask], Vt[neg_mask])
+            # 计算旋转矩阵 R = V @ U^T
+            Ut = U.transpose(-2, -1)
+            V = Vt.transpose(-2, -1)  # [B, 3, 3]
             
-            # 应用旋转
-            pred_aligned = torch.bmm(pred_centered, R)
+            # 处理反射情况：确保det(R) = +1（右手系）
+            det_r = torch.det(torch.bmm(V, Ut))
+            d = torch.where(det_r < 0, -torch.ones_like(det_r), torch.ones_like(det_r))
+            D = torch.eye(3, device=H.device).repeat(H.size(0), 1, 1)
+            D[:, 2, 2] = d
             
-            # 2. 计算距离
+            R = torch.bmm(torch.bmm(U, D), Vt)
+            
+            # 应用最优旋转：pred_aligned = pred_centered @ R
+            pred_aligned = torch.bmm(pred_centered, R)  # [B, N, 3]
+            
+            # 2. 计算对齐后的距离
             distances = torch.sqrt(torch.sum((pred_aligned - target_centered) ** 2, dim=-1))  # [B, N]
             
-            # 3. RNA TM-score计算 - 使用RNA优化的d0公式
+            # 3. RNA TM-score计算 - 使用更准确的d0公式
             L = n_atoms
             
-            # RNA专用的d0计算（基于RNA-align方法）
-            if L > 30:
-                d0 = 1.24 * ((L - 15) ** (1/3)) - 1.8 + 0.3  # 增加0.3埃的偏移
-                d0 = max(d0, 0.5)  # 最小值保持为0.5
-            else:
-                d0 = 0.5 + 0.3 * (L / 30.0)  # 短序列的平滑过渡
-            
+            d0 = 0.6 * (L - 0.5)**0.5 - 2.5
+                        
             # TM-score = 1/L * sum(1 / (1 + (di/d0)^2))
-            d0_squared = d0 ** 2
-            tm_scores = torch.mean(1.0 / (1.0 + distances ** 2 / d0_squared), dim=-1)  # [B]
+            tm_scores = torch.mean(1.0 / (1.0 + distances ** 2 / d0 ** 2), dim=-1)  # [B]
             
-            return torch.clamp(tm_scores, min=0.0, max=1.0)
+            # 验证结果的合理性
+            # TM-score应该在0-1范围内，对于相同结构应该接近1
+            if torch.any(tm_scores > 1.0 + 1e-6):
+                logger.warning(f"警告: 检测到TM-score > 1: {tm_scores[tm_scores > 1.0]}")
+            
+            return tm_scores
             
         except Exception as e:
             logger.warning(f"RNA TM-score计算失败: {e}")
@@ -411,71 +352,131 @@ class RNAEvaluationMetrics:
         """计算最终RNA评估指标"""
         if self.total_samples == 0:
             return {}
-        
-        metrics = {
-            'avg_loss': self.total_loss / self.total_samples,
-            'batch_count': self.batch_count,
-            'total_samples': self.total_samples,
-            'structure_type': 'RNA'  # 专门为RNA设计
+
+        import numpy as np
+
+        metrics: Dict[str, float] = {
+            "avg_loss": self.total_loss / self.total_samples,
+            "batch_count": self.batch_count,
+            "total_samples": self.total_samples,
+            "structure_type": "RNA",
         }
-        
-        # 添加损失分解
-        for component, total_value in self.loss_components.items():
-            metrics[f'avg_{component}'] = total_value / self.total_samples
-        
-        # 添加RNA结构指标
+
+        # loss 分解
+        for k, v in self.loss_components.items():
+            metrics[f"avg_{k}"] = v / self.total_samples
+
+        # 分布式同步指标
+        if hasattr(torch.distributed, 'is_initialized') and torch.distributed.is_initialized():
+            metrics = self._sync_metrics_across_gpus(metrics)
+
         if self.rmsd_values:
-            import numpy as np
-            metrics['avg_rmsd'] = np.mean(self.rmsd_values)
-            metrics['median_rmsd'] = np.median(self.rmsd_values)
-            metrics['std_rmsd'] = np.std(self.rmsd_values)
-        
-        # 添加RNA TM-score指标
+            try:
+                rmsd_arr = np.asarray(self.rmsd_values, dtype=np.float32)  # 指定数据类型以节省内存
+                metrics.update(
+                    avg_rmsd=float(rmsd_arr.mean()),
+                    median_rmsd=float(np.median(rmsd_arr)),
+                    std_rmsd=float(rmsd_arr.std()),
+                )
+                # 清理临时数组
+                del rmsd_arr
+            except Exception as e:
+                logger.warning(f"RMSD指标计算失败: {e}")
+
         if self.tm_scores:
-            import numpy as np
-            metrics['avg_tm_score'] = np.mean(self.tm_scores)
-            metrics['median_tm_score'] = np.median(self.tm_scores)
-            metrics['std_tm_score'] = np.std(self.tm_scores)
-            
-            # RNA特有的阈值评估
-            # RNA family similarity threshold (≥0.45 for same Rfam family)
-            good_predictions = np.sum(np.array(self.tm_scores) >= 0.45)
-            metrics['tm_score_good_ratio'] = good_predictions / len(self.tm_scores)
-            
-            # Excellent predictions (≥0.6)
-            excellent_predictions = np.sum(np.array(self.tm_scores) >= 0.6)
-            metrics['tm_score_excellent_ratio'] = excellent_predictions / len(self.tm_scores)
-        
-        # 添加RNA lDDT指标
+            try:
+                tm_arr = np.asarray(self.tm_scores, dtype=np.float32)
+                metrics.update(
+                    avg_tm_score=float(tm_arr.mean()),
+                    median_tm_score=float(np.median(tm_arr)),
+                    std_tm_score=float(tm_arr.std()),
+                    tm_score_good_ratio=float((tm_arr >= 0.45).mean()),
+                    tm_score_excellent_ratio=float((tm_arr >= 0.60).mean()),
+                )
+                del tm_arr
+            except Exception as e:
+                logger.warning(f"TM-score指标计算失败: {e}")
+
         if self.lddt_scores:
-            import numpy as np
-            metrics['avg_lddt'] = np.mean(self.lddt_scores)
-            metrics['median_lddt'] = np.median(self.lddt_scores)
-            metrics['std_lddt'] = np.std(self.lddt_scores)
-            
-            # lDDT质量分级
-            lddt_array = np.array(self.lddt_scores)
-            metrics['lddt_high_quality_ratio'] = np.sum(lddt_array >= 70.0) / len(self.lddt_scores)  # 高质量
-            metrics['lddt_good_quality_ratio'] = np.sum(lddt_array >= 50.0) / len(self.lddt_scores)   # 良好质量
-        
-        # 添加RNA clash score指标
+            try:
+                lddt_arr = np.asarray(self.lddt_scores, dtype=np.float32)
+                metrics.update(
+                    avg_lddt=float(lddt_arr.mean()),
+                    median_lddt=float(np.median(lddt_arr)),
+                    std_lddt=float(lddt_arr.std()),
+                    lddt_high_quality_ratio=float((lddt_arr >= 70).mean()),
+                    lddt_good_quality_ratio=float((lddt_arr >= 50).mean()),
+                )
+                del lddt_arr
+            except Exception as e:
+                logger.warning(f"lDDT指标计算失败: {e}")
+
         if self.clash_scores:
-            import numpy as np
-            metrics['avg_clash_score'] = np.mean(self.clash_scores)
-            metrics['median_clash_score'] = np.median(self.clash_scores)
-            metrics['std_clash_score'] = np.std(self.clash_scores)
-            
-            # Clash score质量评估 (值越低越好)
-            clash_array = np.array(self.clash_scores)
-            metrics['clash_low_ratio'] = np.sum(clash_array <= 5.0) / len(self.clash_scores)  # 低冲突比例
-        
-        # 添加置信度指标
+            try:
+                clash_arr = np.asarray(self.clash_scores, dtype=np.float32)
+                metrics.update(
+                    avg_clash_score=float(clash_arr.mean()),
+                    median_clash_score=float(np.median(clash_arr)),
+                    std_clash_score=float(clash_arr.std()),
+                    clash_low_ratio=float((clash_arr <= 5).mean()),
+                )
+                del clash_arr
+            except Exception as e:
+                logger.warning(f"Clash score指标计算失败: {e}")
+
         if self.confidence_scores:
-            import numpy as np
-            metrics['avg_confidence'] = np.mean(self.confidence_scores)
-            metrics['median_confidence'] = np.median(self.confidence_scores)
-        
+            try:
+                conf_arr = np.asarray(self.confidence_scores, dtype=np.float32)
+                metrics.update(
+                    avg_confidence=float(conf_arr.mean()),
+                    median_confidence=float(np.median(conf_arr)),
+                )
+                del conf_arr
+            except Exception as e:
+                logger.warning(f"置信度指标计算失败: {e}")
         return metrics
+
+    def _sync_metrics_across_gpus(self, local_metrics: Dict[str, float]) -> Dict[str, float]:
+        """在分布式训练中同步指标"""
+        import torch.distributed as dist
+        
+        world_size = dist.get_world_size()
+        if world_size <= 1:
+            return local_metrics
+        
+        # 收集所有GPU的指标列表
+        all_metrics = [None for _ in range(world_size)]
+        dist.all_gather_object(all_metrics, local_metrics)
+        
+        # 合并所有GPU的指标
+        global_metrics = {}
+        
+        # 对于数值型指标，计算全局平均
+        numeric_keys = ['avg_loss', 'total_samples', 'batch_count']
+        for key in numeric_keys:
+            if key in local_metrics:
+                values = [metrics.get(key, 0.0) for metrics in all_metrics if metrics is not None]
+                global_metrics[key] = sum(values) / len(values)
+        
+        # 对于列表型指标，合并所有GPU的数据
+        if self.rmsd_values:
+            all_rmsd = []
+            for metrics in all_metrics:
+                if metrics and 'rmsd_values' in metrics:
+                    all_rmsd.extend(metrics['rmsd_values'])
+            if all_rmsd:
+                import numpy as np
+                rmsd_arr = np.asarray(all_rmsd)
+                global_metrics.update(
+                    avg_rmsd=float(rmsd_arr.mean()),
+                    median_rmsd=float(np.median(rmsd_arr)),
+                    std_rmsd=float(rmsd_arr.std()),
+                )
+        
+        # 类似地处理其他指标...
+        # 这里可以扩展处理tm_scores, lddt_scores等
+        
+        return global_metrics
 
 
 ########################################
@@ -483,16 +484,18 @@ class RNAEvaluationMetrics:
 ########################################
 
 def _random_rotation(batch: int, device: torch.device):
-    """Generate a batch of random 3×3 rotation matrices (det=+1)."""
-    rand = torch.randn(batch, 3, 3, device=device)
-    U, _, Vh = torch.linalg.svd(rand)
-    V = Vh.transpose(1, 2)
-    R = torch.bmm(V, U.transpose(1, 2))
-    det = torch.det(R)
-    mask = det < 0.0
-    if mask.any():
-        V[mask, :, -1] *= -1
-        R[mask] = torch.bmm(V[mask], U.transpose(1, 2)[mask])
+    """Return a batch of proper (det = +1) rotation matrices, shape [B, 3, 3]."""
+    A = torch.randn(batch, 3, 3, device=device)          # random Gaussian
+    U, _, Vt = torch.linalg.svd(A, full_matrices=False)  # A = U Σ Vᵀ
+    V        = Vt.transpose(1, 2)
+    Ut       = U.transpose(1, 2)
+
+    # 最优旋转：R = V D Uᵀ，D 用来消除可能的反射
+    dets = torch.det(torch.bmm(V, Ut))                   # ±1 for each sample
+    D    = torch.eye(3, device=device).repeat(batch, 1, 1)
+    D[:, 2, 2] = torch.where(dets < 0, -1.0, 1.0)
+
+    R = torch.bmm(torch.bmm(V, D), Ut)                   # 保证 det(R)=+1
     return R
 
 
@@ -525,8 +528,40 @@ def test_metrics_pipeline():
     assert results["avg_lddt"] > 99.0
 
 
+def test_tm_score_calculation():
+    """测试TM-score计算的正确性"""
+    B, N = 1, 50
+    device = torch.device("cpu")
+    
+    # 创建相同的坐标（应该得到TM-score ≈ 1）
+    coords = torch.randn(B, N, 3, device=device)
+    metric = RNAEvaluationMetrics()
+    
+    # 测试相同结构的TM-score
+    tm_scores = metric._compute_rna_tm_score(coords, coords)
+    print(f"相同结构TM-score: {tm_scores}")
+    assert torch.allclose(tm_scores, torch.ones_like(tm_scores), atol=1e-6), f"相同结构TM-score应该为1，得到: {tm_scores}"
+    
+    # 测试随机旋转后的TM-score
+    R = _random_rotation(B, device)
+    t = torch.randn(B, 1, 3, device=device)
+    coords_transformed = torch.bmm(coords, R) + t
+    
+    tm_scores_transformed = metric._compute_rna_tm_score(coords_transformed, coords)
+    print(f"旋转后TM-score: {tm_scores_transformed}")
+    assert torch.all(tm_scores_transformed > 0.9), f"旋转后TM-score应该仍然很高，得到: {tm_scores_transformed}"
+    
+    # 测试完全不同的结构（应该得到低TM-score）
+    random_coords = torch.randn_like(coords)
+    tm_scores_random = metric._compute_rna_tm_score(random_coords, coords)
+    print(f"随机结构TM-score: {tm_scores_random}")
+    assert torch.all(tm_scores_random < 0.8), f"不同结构TM-score应该较低，得到: {tm_scores_random}"
+    
+    print("✅ TM-score计算测试通过")
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     test_kabsch_alignment()
+    test_tm_score_calculation()
     test_metrics_pipeline()
     print("All tests passed ✔")

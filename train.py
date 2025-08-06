@@ -20,6 +20,7 @@ from tqdm import tqdm
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 import os
+import numpy as np
 
 # 导入模型和数据处理
 from diffold.diffold import Diffold
@@ -752,6 +753,10 @@ class DiffoldTrainer:
                 continue
         
         avg_loss = total_loss / max(num_batches, 1)
+        
+        # 🔥 分布式聚合训练损失
+        avg_loss = self._sync_loss_across_gpus(avg_loss, num_batches)
+        
         return avg_loss
     
     def train_step(self, batch: Dict, batch_idx: int, epoch: int) -> Optional[torch.Tensor]:
@@ -840,18 +845,42 @@ class DiffoldTrainer:
             if self.scaler is not None:
                 self.scaler.scale(loss).backward()
                 self.scaler.unscale_(self.optimizer)
-                if self.using_ddp:
-                    torch.nn.utils.clip_grad_norm_(self.model.module.get_trainable_parameters(), self.config.grad_clip_norm)
-                else:
-                    torch.nn.utils.clip_grad_norm_(self.model.get_trainable_parameters(), self.config.grad_clip_norm)
+                
+                # 梯度裁剪（在unscale之后）
+                try:
+                    if self.using_ddp:
+                        if hasattr(self.model.module, 'get_trainable_parameters'):
+                            torch.nn.utils.clip_grad_norm_(self.model.module.get_trainable_parameters(), self.config.grad_clip_norm)
+                        else:
+                            torch.nn.utils.clip_grad_norm_(self.model.module.parameters(), self.config.grad_clip_norm)
+                    else:
+                        if hasattr(self.model, 'get_trainable_parameters'):
+                            torch.nn.utils.clip_grad_norm_(self.model.get_trainable_parameters(), self.config.grad_clip_norm)
+                        else:
+                            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip_norm)
+                except Exception as e:
+                    logger.warning(f"梯度裁剪失败: {e}")
+                
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
                 loss.backward()
-                if self.using_ddp:
-                    torch.nn.utils.clip_grad_norm_(self.model.module.get_trainable_parameters(), self.config.grad_clip_norm)
-                else:
-                    torch.nn.utils.clip_grad_norm_(self.model.get_trainable_parameters(), self.config.grad_clip_norm)
+                
+                # 梯度裁剪
+                try:
+                    if self.using_ddp:
+                        if hasattr(self.model.module, 'get_trainable_parameters'):
+                            torch.nn.utils.clip_grad_norm_(self.model.module.get_trainable_parameters(), self.config.grad_clip_norm)
+                        else:
+                            torch.nn.utils.clip_grad_norm_(self.model.module.parameters(), self.config.grad_clip_norm)
+                    else:
+                        if hasattr(self.model, 'get_trainable_parameters'):
+                            torch.nn.utils.clip_grad_norm_(self.model.get_trainable_parameters(), self.config.grad_clip_norm)
+                        else:
+                            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip_norm)
+                except Exception as e:
+                    logger.warning(f"梯度裁剪失败: {e}")
+                
                 self.optimizer.step()
         
 
@@ -872,6 +901,10 @@ class DiffoldTrainer:
         # 🔥 重置增强指标
         if self.enhanced_metrics:
             self.enhanced_metrics['val'].reset()
+        
+        # 确保所有GPU都重置了指标后再同步
+        if self.world_size > 1:
+            dist.barrier()
         
         # 测试模式下限制batch数量
         if self.config.test_mode:
@@ -958,6 +991,10 @@ class DiffoldTrainer:
                     continue
         
         avg_loss = total_loss / max(num_batches, 1)
+        
+        # 🔥 分布式聚合验证损失
+        avg_loss = self._sync_loss_across_gpus(avg_loss, num_batches)
+        
         return avg_loss
     
     def save_checkpoint(self, epoch: int, is_best: bool = False):
@@ -1233,6 +1270,7 @@ class DiffoldTrainer:
         
         for epoch in range(start_epoch, num_epochs):
             epoch_start_time = time.time()
+            if self.config.test_mode and epoch >= self.config.test_epochs: break
             
             # 训练一个epoch
             train_loss = self.train_one_epoch(epoch)
@@ -1273,8 +1311,25 @@ class DiffoldTrainer:
             
             # 🔥 记录增强评估指标
             if self.enhanced_metrics:
+                # 确保所有GPU都计算完指标后再同步
+                if self.world_size > 1:
+                    dist.barrier()  # 等待所有GPU完成指标计算
+                
                 train_metrics = self.enhanced_metrics['train'].compute_metrics()
                 val_metrics = self.enhanced_metrics['val'].compute_metrics() if valid_loss is not None else {}
+                
+                # 分布式同步验证指标（确保所有GPU看到相同的结果）
+                if self.world_size > 1 and valid_loss is not None:
+                    # 同步关键指标
+                    if 'avg_rmsd' in val_metrics:
+                        rmsd_tensor = torch.tensor(val_metrics['avg_rmsd'], device=self.device)
+                        dist.broadcast(rmsd_tensor, src=0)
+                        val_metrics['avg_rmsd'] = rmsd_tensor.item()
+                    
+                    if 'avg_tm_score' in val_metrics:
+                        tm_tensor = torch.tensor(val_metrics['avg_tm_score'], device=self.device)
+                        dist.broadcast(tm_tensor, src=0)
+                        val_metrics['avg_tm_score'] = tm_tensor.item()
                 
                 if val_metrics and self.is_main_process:
                     # RNA结构评估指标输出
@@ -1416,6 +1471,64 @@ class DiffoldTrainer:
         # DDP结束
         if self.world_size > 1:
             dist.destroy_process_group()
+
+    def _sync_metrics_across_gpus(self, metrics: Dict[str, float]) -> Dict[str, float]:
+        """在分布式训练中同步指标"""
+        if self.world_size <= 1:
+            return metrics
+        
+        # 收集所有GPU的指标
+        all_metrics = [None for _ in range(self.world_size)]
+        dist.all_gather_object(all_metrics, metrics)
+        
+        # 合并所有GPU的指标
+        global_metrics = {}
+        
+        # 对于数值型指标，计算全局平均
+        numeric_keys = ['avg_loss', 'total_samples', 'batch_count']
+        for key in numeric_keys:
+            if key in metrics:
+                values = [m.get(key, 0.0) for m in all_metrics if m is not None]
+                global_metrics[key] = sum(values) / len(values)
+        
+        # 对于列表型指标，合并所有GPU的数据
+        if 'rmsd_values' in metrics:
+            all_rmsd = []
+            for m in all_metrics:
+                if m and 'rmsd_values' in m:
+                    all_rmsd.extend(m['rmsd_values'])
+            if all_rmsd:
+                import numpy as np
+                rmsd_arr = np.asarray(all_rmsd)
+                global_metrics.update(
+                    avg_rmsd=float(rmsd_arr.mean()),
+                    median_rmsd=float(np.median(rmsd_arr)),
+                    std_rmsd=float(rmsd_arr.std()),
+                )
+        
+        return global_metrics
+
+    def _sync_loss_across_gpus(self, local_loss: float, local_batches: int) -> float:
+        """在分布式训练中同步损失"""
+        if self.world_size <= 1:
+            return local_loss
+        
+        # 收集所有GPU的损失和batch数量
+        loss_tensor = torch.tensor([local_loss, local_batches], device=self.device)
+        all_losses = [torch.zeros_like(loss_tensor) for _ in range(self.world_size)]
+        dist.all_gather(all_losses, loss_tensor)
+        
+        # 计算全局平均损失
+        total_global_loss = 0.0
+        total_global_batches = 0
+        for loss_batch in all_losses:
+            total_global_loss += loss_batch[0].item() * loss_batch[1].item()
+            total_global_batches += loss_batch[1].item()
+        
+        if total_global_batches > 0:
+            return total_global_loss / total_global_batches
+        else:
+            return local_loss
 
 
 

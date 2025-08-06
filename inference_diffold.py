@@ -24,6 +24,9 @@ from rhofold.utils.alphabet import get_features
 # 导入PDB转换功能
 from diffold.output import diffold_coords_to_pdb, validate_diffold_output
 
+# 导入MSA构建功能
+from rhofold.data.balstn import BLASTN
+
 @torch.no_grad()
 def main(config):
     '''
@@ -54,16 +57,16 @@ def main(config):
     
     # 构建Diffold模型
     logger.info('构建Diffold模型')
-    model = Diffold(config, rhofold_checkpoint_path=config.rhofold_checkpoint)
+    model = Diffold(config, rhofold_checkpoint_path=config.rf_ckpt)
     model = model.to(config.device)
     model.eval()
     
     # 加载检查点
-    if config.checkpoint_path:
-        logger.info(f'加载检查点: {config.checkpoint_path}')
+    if config.ckpt:
+        logger.info(f'加载检查点: {config.ckpt}')
         try:
             # 尝试只加载模型权重，避免加载优化器状态
-            checkpoint = torch.load(config.checkpoint_path, map_location=config.device, weights_only=True)
+            checkpoint = torch.load(config.ckpt, map_location=config.device, weights_only=True)
             if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
                 model.load_state_dict(checkpoint['model_state_dict'])
             else:
@@ -71,7 +74,7 @@ def main(config):
         except Exception as e:
             logger.warning(f'weights_only=True 加载失败，回退到完整加载: {e}')
             # 回退到加载完整检查点，但只使用模型权重
-            checkpoint = torch.load(config.checkpoint_path, map_location=config.device, weights_only=False)
+            checkpoint = torch.load(config.ckpt, map_location=config.device, weights_only=False)
             model.load_state_dict(checkpoint['model_state_dict'])
         logger.info('检查点加载完成')
     
@@ -95,6 +98,62 @@ def main(config):
     sequence = sequences[0]  # 使用第一个序列
     logger.info(f'序列长度: {len(sequence)}')
     logger.info(f'序列: {sequence}')
+    
+    # MSA构建逻辑
+    logger.info(f"输入FASTA文件: {config.input_fas}")
+    
+    if config.single_seq_pred:
+        config.input_a3m = config.input_fas
+        logger.info(f"使用单序列预测模式，MSA文件设置为输入FASTA文件")
+    
+    elif config.input_a3m is None:
+        # 自动构建MSA
+        config.input_a3m = f'{config.output_dir}/seq.a3m'
+        logger.info(f"未提供MSA文件，开始自动构建MSA: {config.input_a3m}")
+        
+        # 检查数据库路径
+        if not hasattr(config, 'database_dpath') or not config.database_dpath:
+            logger.warning("未设置数据库路径，使用默认路径: ./database")
+            config.database_dpath = './database'
+        
+        if not hasattr(config, 'binary_dpath') or not config.binary_dpath:
+            logger.warning("未设置BLAST二进制文件路径，使用默认路径: ./rhofold/data/bin")
+            config.binary_dpath = './rhofold/data/bin'
+        
+        # 检查数据库文件是否存在
+        databases = [f'{config.database_dpath}/rnacentral.fasta', f'{config.database_dpath}/nt']
+        missing_dbs = [db for db in databases if not os.path.exists(db)]
+        
+        if missing_dbs:
+            logger.error(f"缺少数据库文件: {missing_dbs}")
+            logger.error("请确保已下载并构建RNA数据库")
+            logger.error("可以使用以下命令构建数据库:")
+            logger.error("./database/bin/builddb.sh")
+            raise FileNotFoundError(f"缺少数据库文件: {missing_dbs}")
+        
+        # 检查BLAST二进制文件
+        blast_binary = f'{config.binary_dpath}/blastn'
+        if not os.path.exists(blast_binary):
+            logger.error(f"BLAST二进制文件不存在: {blast_binary}")
+            raise FileNotFoundError(f"BLAST二进制文件不存在: {blast_binary}")
+        
+        # 执行BLAST搜索
+        try:
+            blast = BLASTN(
+                binary_dpath=config.binary_dpath, 
+                databases=databases,
+                n_cpu=getattr(config, 'n_cpu', 4)
+            )
+            blast.query(config.input_fas, config.input_a3m, logger)
+            logger.info(f"MSA构建完成: {config.input_a3m}")
+        except Exception as e:
+            logger.error(f"MSA构建失败: {e}")
+            logger.info("回退到单序列预测模式")
+            config.input_a3m = config.input_fas
+            config.single_seq_pred = True
+    
+    else:
+        logger.info(f"使用提供的MSA文件: {config.input_a3m}")
     
     # 准备输入数据
     logger.info('准备输入数据')
@@ -206,23 +265,42 @@ if __name__ == '__main__':
     parser.add_argument("--device", 
                        help="设备类型，默认自动检测。可设置为 cuda:<GPU_index> 或 cpu", 
                        default=None)
-    parser.add_argument("--checkpoint_path", 
+    parser.add_argument("--ckpt", 
                        help="Diffold模型检查点路径", 
-                       default=None)
-    parser.add_argument("--rhofold_checkpoint", 
+                       default=None,
+                       required=True)
+    parser.add_argument("--rf_ckpt", 
                        help="RhoFold预训练模型路径", 
-                       default='./pretrained/model_20221010_params.pt')
+                       default='./pretrained/model_20221010_params.pt',
+                       required=True)
     
     # 输入输出
     parser.add_argument("--input_fas", 
                        help="输入FASTA文件路径", 
-                       default='./example/input/3owzA/3owzA.fasta')
+                       default=None,
+                       required=True)
     parser.add_argument("--input_a3m", 
-                       help="输入MSA文件路径 (可选)", 
+                       help="输入MSA文件路径 (可选，如果不提供将自动构建)", 
                        default=None)
     parser.add_argument("--output_dir", 
                        help="输出目录路径", 
-                       default='./example/output/diffold_3owzA')
+                       default=None,
+                       required=True)
+    
+    # MSA构建参数
+    parser.add_argument("--single_seq_pred", 
+                       help="使用单序列预测模式，不使用MSA", 
+                       action='store_true')
+    parser.add_argument("--database_dpath", 
+                       help="RNA数据库路径，默认 ./database", 
+                       default='./database')
+    parser.add_argument("--binary_dpath", 
+                       help="BLAST二进制文件路径，默认 ./rhofold/data/bin", 
+                       default='./rhofold/data/bin')
+    parser.add_argument("--n_cpu", 
+                       help="BLAST搜索使用的CPU核心数，默认4", 
+                       type=int, 
+                       default=4)
     
     # 优化参数
     parser.add_argument("--relax_steps", 
