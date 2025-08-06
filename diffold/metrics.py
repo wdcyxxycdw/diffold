@@ -444,9 +444,12 @@ class RNAEvaluationMetrics:
         if world_size <= 1:
             return local_metrics
         
+        # 获取当前设备
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
         # 收集所有GPU的指标列表
         all_metrics = [None for _ in range(world_size)]
-        dist.all_gather_object(all_metrics, local_metrics)
+        dist.all_gather_object(all_metrics, local_metrics, device=device, group=None)
         
         # 合并所有GPU的指标
         global_metrics = {}

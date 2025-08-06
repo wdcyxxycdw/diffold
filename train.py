@@ -904,7 +904,7 @@ class DiffoldTrainer:
         
         # 确保所有GPU都重置了指标后再同步
         if self.world_size > 1:
-            dist.barrier()
+            dist.barrier(device_ids=[self.local_rank] if self.device.type == 'cuda' else None)
         
         # 测试模式下限制batch数量
         if self.config.test_mode:
@@ -1280,6 +1280,10 @@ class DiffoldTrainer:
             if epoch % self.config.validate_every == 0:
                 valid_loss = self.validate(epoch)
             
+            # 🔥 调试：验证分布式同步
+            if self.world_size > 1 == 0:  # 每5个epoch检查一次
+                self._debug_distributed_sync(train_loss, valid_loss, epoch)
+            
             # 更新学习率
             if self.enhanced_optimizer:
                 # 使用增强优化器
@@ -1313,7 +1317,7 @@ class DiffoldTrainer:
             if self.enhanced_metrics:
                 # 确保所有GPU都计算完指标后再同步
                 if self.world_size > 1:
-                    dist.barrier()  # 等待所有GPU完成指标计算
+                    dist.barrier(device_ids=[self.local_rank] if self.device.type == 'cuda' else None)  # 等待所有GPU完成指标计算
                 
                 train_metrics = self.enhanced_metrics['train'].compute_metrics()
                 val_metrics = self.enhanced_metrics['val'].compute_metrics() if valid_loss is not None else {}
@@ -1323,12 +1327,12 @@ class DiffoldTrainer:
                     # 同步关键指标
                     if 'avg_rmsd' in val_metrics:
                         rmsd_tensor = torch.tensor(val_metrics['avg_rmsd'], device=self.device)
-                        dist.broadcast(rmsd_tensor, src=0)
+                        dist.broadcast(rmsd_tensor, src=0, group=None)
                         val_metrics['avg_rmsd'] = rmsd_tensor.item()
                     
                     if 'avg_tm_score' in val_metrics:
                         tm_tensor = torch.tensor(val_metrics['avg_tm_score'], device=self.device)
-                        dist.broadcast(tm_tensor, src=0)
+                        dist.broadcast(tm_tensor, src=0, group=None)
                         val_metrics['avg_tm_score'] = tm_tensor.item()
                 
                 if val_metrics and self.is_main_process:
@@ -1407,6 +1411,10 @@ class DiffoldTrainer:
                 if is_best:
                     log_msg += " 🏆 NEW BEST"
                 
+                # 🔥 添加分布式同步验证信息
+                if self.world_size > 1:
+                    log_msg += f" [GPU{self.world_size}同步]"
+                
                 logger.info(log_msg)
                 
                 # 时间统计行（简化显示）
@@ -1470,6 +1478,8 @@ class DiffoldTrainer:
             self.writer.close()
         # DDP结束
         if self.world_size > 1:
+            # 确保所有进程都完成后再销毁进程组
+            dist.barrier(device_ids=[self.local_rank] if self.device.type == 'cuda' else None)
             dist.destroy_process_group()
 
     def _sync_metrics_across_gpus(self, metrics: Dict[str, float]) -> Dict[str, float]:
@@ -1479,7 +1489,7 @@ class DiffoldTrainer:
         
         # 收集所有GPU的指标
         all_metrics = [None for _ in range(self.world_size)]
-        dist.all_gather_object(all_metrics, metrics)
+        dist.all_gather_object(all_metrics, metrics, device=self.device, group=None)
         
         # 合并所有GPU的指标
         global_metrics = {}
@@ -1516,7 +1526,7 @@ class DiffoldTrainer:
         # 收集所有GPU的损失和batch数量
         loss_tensor = torch.tensor([local_loss, local_batches], device=self.device)
         all_losses = [torch.zeros_like(loss_tensor) for _ in range(self.world_size)]
-        dist.all_gather(all_losses, loss_tensor)
+        dist.all_gather(all_losses, loss_tensor, device=self.device, group=None)
         
         # 计算全局平均损失
         total_global_loss = 0.0
@@ -1529,6 +1539,36 @@ class DiffoldTrainer:
             return total_global_loss / total_global_batches
         else:
             return local_loss
+
+    def _debug_distributed_sync(self, train_loss: float, valid_loss: float, epoch: int):
+        """调试分布式同步 - 验证所有GPU的损失值是否一致"""
+        if self.world_size <= 1:
+            return
+        
+        # 收集所有GPU的损失值
+        train_tensor = torch.tensor(train_loss, device=self.device)
+        valid_tensor = torch.tensor(valid_loss if valid_loss is not None else 0.0, device=self.device)
+        
+        all_train_losses = [torch.zeros_like(train_tensor) for _ in range(self.world_size)]
+        all_valid_losses = [torch.zeros_like(valid_tensor) for _ in range(self.world_size)]
+        
+        dist.all_gather(all_train_losses, train_tensor, device=self.device, group=None)
+        dist.all_gather(all_valid_losses, valid_tensor, device=self.device, group=None)
+        
+        # 检查是否所有GPU的损失值一致
+        train_losses = [loss.item() for loss in all_train_losses]
+        valid_losses = [loss.item() for loss in all_valid_losses]
+        
+        train_consistent = len(set(round(x, 6) for x in train_losses)) == 1
+        valid_consistent = len(set(round(x, 6) for x in valid_losses)) == 1
+        
+        if self.is_main_process:
+            if not train_consistent:
+                logger.warning(f"⚠️ Epoch {epoch}: 训练损失不一致! GPU0-{self.world_size-1}: {train_losses}")
+            if not valid_consistent and valid_loss is not None:
+                logger.warning(f"⚠️ Epoch {epoch}: 验证损失不一致! GPU0-{self.world_size-1}: {valid_losses}")
+            if train_consistent and valid_consistent:
+                logger.debug(f"✅ Epoch {epoch}: 所有GPU损失值已正确同步")
 
 
 
@@ -1778,9 +1818,10 @@ def main():
     world_size = int(os.environ.get('WORLD_SIZE', '1'))
     local_rank = int(os.environ.get('LOCAL_RANK', args.local_rank))
     if world_size > 1:
-        dist.init_process_group(backend='nccl')
+        # 在初始化进程组之前设置设备
         torch.cuda.set_device(local_rank)
         device = torch.device(f'cuda:{local_rank}')
+        dist.init_process_group(backend='nccl')
     else:
         device = torch.device(config.device)
     
@@ -1820,6 +1861,8 @@ def main():
     trainer.train(resume_from=args.resume)
     # DDP结束
     if world_size > 1:
+        # 确保所有进程都完成后再销毁进程组
+        dist.barrier(device_ids=[local_rank] if device.type == 'cuda' else None)
         dist.destroy_process_group()
 
 
