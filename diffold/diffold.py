@@ -85,8 +85,9 @@ class Diffold(nn.Module):
         
         # 损失权重
         self.loss_confidence_weight = 1e-4
-        self.loss_distogram_weight = 1e-2
-        self.loss_diffusion_weight = 4.0
+        self.loss_pae_weight = 0
+        self.loss_distogram_weight = 0
+        self.loss_diffusion_weight = 2.0
 
         # 使用 RhoFold 自带的配置
         from rhofold.config import rhofold_config
@@ -230,6 +231,7 @@ class Diffold(nn.Module):
             enable_logging=True,
             strict_mode=True  # 在生产环境中可以设为True
         )
+        self.mask_validator_on = False
         
     def _compute_confidence_loss(self, single_fea, single_inputs, pair_fea, denoised_atom_pos, atom_feats,
                                 atom_pos_ground_truth, molecule_atom_indices, molecule_atom_lens,
@@ -372,7 +374,7 @@ class Diffold(nn.Module):
         resolved_loss = torch.mean(ch_logits.resolved * 0.0)
         
         # 总置信度损失
-        total_confidence_loss = pae_loss + pde_loss + plddt_loss + resolved_loss
+        total_confidence_loss = self.loss_pae_weight * pae_loss + pde_loss + plddt_loss
         
         confidence_results = {
             'pae_loss': pae_loss,
@@ -687,65 +689,6 @@ class Diffold(nn.Module):
             logger.error("没有提供molecule_atom_lens")
             exit()
 
-        # 🔧 处理missing_atom_mask的对齐 - 同样需要删除每个碱基最后一个原子的mask
-        if af_in.atom_pos is not None and missing_atom_mask is not None:
-            from rhofold.utils.constants import ATOM_NAMES_PER_RESD
-            
-            # 重新计算keep_indices，与align_input函数中的逻辑保持一致
-            ATOMS_PER_BASE = {
-                "A": len(ATOM_NAMES_PER_RESD["A"]),  # 22
-                "G": len(ATOM_NAMES_PER_RESD["G"]),  # 23  
-                "U": len(ATOM_NAMES_PER_RESD["U"]),  # 20
-                "C": len(ATOM_NAMES_PER_RESD["C"])   # 20
-            }
-            
-            # 处理序列格式
-            if isinstance(seq, str):
-                sequences = [seq]
-            elif isinstance(seq, list):
-                sequences = seq
-            else:
-                sequences = seq
-            
-            # 计算需要保留的原子索引（与align_input逻辑一致）
-            keep_indices = []
-            current_atom_idx = 0
-            
-            for sequence in sequences:
-                for base in sequence:
-                    if base in ATOMS_PER_BASE:
-                        atoms_count = ATOMS_PER_BASE[base]
-                        base_keep_indices = list(range(current_atom_idx, current_atom_idx + atoms_count - 1))
-                        keep_indices.extend(base_keep_indices)
-                        current_atom_idx += atoms_count
-            
-            # 对missing_atom_mask进行相同的裁切
-            if len(keep_indices) > 0:
-                keep_indices_tensor = torch.tensor(keep_indices, dtype=torch.long, device=device)
-                
-                # 确保keep_indices不超出missing_atom_mask的范围
-                max_original_atoms = missing_atom_mask.shape[1]
-                valid_keep_indices = keep_indices_tensor[keep_indices_tensor < max_original_atoms]
-                
-                if len(valid_keep_indices) > 0:
-                    missing_atom_mask_aligned = missing_atom_mask[:, valid_keep_indices]
-                    logger.debug(f"对齐missing_atom_mask: {missing_atom_mask.shape} -> {missing_atom_mask_aligned.shape}")
-                    missing_atom_mask = missing_atom_mask_aligned
-                else:
-                    logger.warning("没有有效的keep_indices用于missing_atom_mask对齐")
-            
-            # 检查是否需要进一步扩展missing_atom_mask以匹配af_in.atom_pos
-            batch_num = af_in.atom_pos.shape[0]
-            padded_atom_num = af_in.atom_pos.shape[1]
-            current_atom_num = missing_atom_mask.shape[1]
-            
-            if padded_atom_num > current_atom_num:    
-                missing_atom_mask = torch.cat([
-                    missing_atom_mask, 
-                    torch.ones(batch_num, padded_atom_num - current_atom_num, device=device, dtype=missing_atom_mask.dtype)
-                ], dim=1)
-                logger.debug(f"扩展对齐后的missing_atom_mask: {current_atom_num} -> {padded_atom_num}")
-
         relative_position_encoding = self.relative_position_encoding(
             additional_molecule_feats = af_in.additional_molecule_feats,
         )
@@ -758,8 +701,8 @@ class Diffold(nn.Module):
             logger.debug(f"计算损失 - 模式: {'训练' if self.training else '验证'}")
             
             # 🔍 验证batch数据一致性（在训练模式下）
-            if self.training and hasattr(self, 'mask_validator') and missing_atom_mask is not None:
-                try:
+            if self.mask_validator_on and self.training and hasattr(self, 'mask_validator') and missing_atom_mask is not None:
+                try: 
                     # 只有在有必要数据时才进行验证
                     if target_coords is not None and seq is not None:
                         batch_validation = self.mask_validator.validate_batch_consistency(

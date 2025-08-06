@@ -3,6 +3,7 @@
 RNA数据长度筛选脚本
 根据序列长度（16-256nt）筛选RNA3D_DATA中的数据，并使用CD-HIT进行序列去冗余
 将符合条件的数据复制到processed_data文件夹，保持原有的目录结构
+新增功能：根据缺失原子比例进行筛选
 """
 
 import os
@@ -14,6 +15,8 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Set
 import argparse
 from collections import defaultdict
+import re
+from rhofold.utils.constants import ATOM_NAMES_PER_RESD
 
 
 def read_fasta_sequence(filepath: str) -> Optional[str]:
@@ -70,6 +73,63 @@ def read_seq_file_sequence(filepath: str) -> Optional[str]:
         return None
 
 
+def calculate_atom_completeness(pdb_filepath: str, sequence: str) -> Tuple[float, int, int]:
+    """
+    计算PDB文件中的原子完整性比例
+    
+    Args:
+        pdb_filepath: PDB文件路径
+        sequence: RNA序列字符串
+        
+    Returns:
+        (完整性比例, 实际原子数, 预期原子数)
+    """
+    try:
+        if not os.path.exists(pdb_filepath):
+            return 0.0, 0, 0
+        
+        # 计算预期原子数（根据序列和每个核苷酸的原子定义）
+        expected_atoms = 0
+        for residue in sequence:
+            if residue in ATOM_NAMES_PER_RESD:
+                expected_atoms += len(ATOM_NAMES_PER_RESD[residue])
+        
+        if expected_atoms == 0:
+            return 0.0, 0, 0
+        
+        # 读取PDB文件，统计实际存在的原子数
+        with open(pdb_filepath, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+        
+        actual_atoms = 0
+        
+        for line in lines:
+            line = line.strip()
+            if line.startswith('ATOM') or line.startswith('HETATM'):
+                # 检查原子坐标是否完整（不是缺失的）
+                if len(line) >= 54:  # 确保行足够长
+                    try:
+                        x = float(line[30:38].strip())
+                        y = float(line[38:46].strip())
+                        z = float(line[46:54].strip())
+                        
+                        # 检查坐标是否合理（不是缺失值）
+                        # 缺失的原子通常用0.000或999.999表示
+                        if (x != 0.0 or y != 0.0 or z != 0.0) and \
+                           abs(x) < 999.0 and abs(y) < 999.0 and abs(z) < 999.0:
+                            actual_atoms += 1
+                    except ValueError:
+                        # 如果无法解析坐标，认为是缺失的
+                        pass
+        
+        completeness = actual_atoms / expected_atoms if expected_atoms > 0 else 0.0
+        return completeness, actual_atoms, expected_atoms
+        
+    except Exception as e:
+        print(f"❌ 计算原子完整性时出错 {pdb_filepath}: {e}")
+        return 0.0, 0, 0
+
+
 def get_sequence_length(sequence: str) -> int:
     """获取序列长度（忽略非字母字符）"""
     if not sequence:
@@ -79,19 +139,21 @@ def get_sequence_length(sequence: str) -> int:
     return len([c for c in sequence if c.isalpha()])
 
 
-def scan_all_sequences(data_dir: str) -> Dict[str, Tuple[str, int, str]]:
+def scan_all_sequences(data_dir: str, min_completeness: float = 0.0) -> Dict[str, Tuple[str, int, str, float, int, int]]:
     """
-    扫描所有序列文件并获取长度信息
+    扫描所有序列文件并获取长度信息和原子完整性
     
     Args:
         data_dir: 数据目录路径
+        min_completeness: 最小原子完整性阈值
         
     Returns:
-        字典，键为文件basename，值为(file_path, length, file_type)元组
+        字典，键为文件basename，值为(file_path, length, file_type, completeness, valid_atoms, total_atoms)元组
         file_type可能是'fasta'或'seq'
     """
     sequences_dir = Path(data_dir) / "sequences"
     seq_dir = Path(data_dir) / "seq"
+    pdb_dir = Path(data_dir) / "pdb"
     
     all_sequences = {}
     
@@ -103,8 +165,13 @@ def scan_all_sequences(data_dir: str) -> Dict[str, Tuple[str, int, str]]:
             sequence = read_fasta_sequence(str(fasta_file))
             if sequence:
                 length = get_sequence_length(sequence)
-                all_sequences[basename] = (str(fasta_file), length, 'fasta')
-                print(f"  📄 {basename}: {length}nt")
+                
+                # 检查对应的PDB文件
+                pdb_file = pdb_dir / f"{basename}.pdb"
+                completeness, valid_atoms, total_atoms = calculate_atom_completeness(str(pdb_file), sequence)
+                
+                all_sequences[basename] = (str(fasta_file), length, 'fasta', completeness, valid_atoms, total_atoms)
+                print(f"  📄 {basename}: {length}nt, 完整性: {completeness:.1%} ({valid_atoms}/{total_atoms} 原子)")
             else:
                 print(f"  ❌ 无法读取: {basename}")
     
@@ -120,47 +187,64 @@ def scan_all_sequences(data_dir: str) -> Dict[str, Tuple[str, int, str]]:
             sequence = read_seq_file_sequence(str(seq_file))
             if sequence:
                 length = get_sequence_length(sequence)
-                all_sequences[basename] = (str(seq_file), length, 'seq')
-                print(f"  📄 {basename}: {length}nt")
+                
+                # 检查对应的PDB文件
+                pdb_file = pdb_dir / f"{basename}.pdb"
+                completeness, valid_atoms, total_atoms = calculate_atom_completeness(str(pdb_file), sequence)
+                
+                all_sequences[basename] = (str(seq_file), length, 'seq', completeness, valid_atoms, total_atoms)
+                print(f"  📄 {basename}: {length}nt, 完整性: {completeness:.1%} ({valid_atoms}/{total_atoms} 原子)")
             else:
                 print(f"  ❌ 无法读取: {basename}")
     
     return all_sequences
 
 
-def filter_by_length(sequences: Dict[str, Tuple[str, int, str]], 
-                    min_length: int = 16, 
-                    max_length: int = 256) -> Dict[str, Tuple[str, int, str]]:
+def filter_by_length_and_completeness(sequences: Dict[str, Tuple[str, int, str, float, int, int]], 
+                                    min_length: int = 16, 
+                                    max_length: int = 256,
+                                    min_completeness: float = 0.8) -> Dict[str, Tuple[str, int, str, float, int, int]]:
     """
-    根据长度范围筛选序列
+    根据长度范围和原子完整性筛选序列
     
     Args:
         sequences: 序列信息字典
         min_length: 最小长度
         max_length: 最大长度
+        min_completeness: 最小原子完整性阈值
         
     Returns:
         筛选后的序列字典
     """
     filtered = {}
     
-    print(f"🔍 筛选长度范围: {min_length}-{max_length}nt")
-    print("-" * 60)
+    print(f"🔍 筛选条件:")
+    print(f"  - 长度范围: {min_length}-{max_length}nt")
+    print(f"  - 原子完整性: ≥{min_completeness:.1%}")
+    print("-" * 80)
     
-    for basename, (file_path, length, file_type) in sequences.items():
-        if min_length <= length <= max_length:
-            filtered[basename] = (file_path, length, file_type)
-            print(f"✅ {basename}: {length}nt - 符合条件")
+    for basename, (file_path, length, file_type, completeness, actual_atoms, expected_atoms) in sequences.items():
+        length_ok = min_length <= length <= max_length
+        completeness_ok = completeness >= min_completeness
+        
+        if length_ok and completeness_ok:
+            filtered[basename] = (file_path, length, file_type, completeness, actual_atoms, expected_atoms)
+            print(f"✅ {basename}: {length}nt, 完整性: {completeness:.1%} ({actual_atoms}/{expected_atoms}) - 符合条件")
         else:
-            print(f"❌ {basename}: {length}nt - 超出范围")
+            reasons = []
+            if not length_ok:
+                reasons.append(f"长度{length}nt超出范围")
+            if not completeness_ok:
+                reasons.append(f"完整性{completeness:.1%}低于阈值")
+            print(f"❌ {basename}: {length}nt, 完整性: {completeness:.1%} ({actual_atoms}/{expected_atoms}) - {'; '.join(reasons)}")
     
-    print("-" * 60)
+    print("-" * 80)
     print(f"📊 筛选结果: 原始 {len(sequences)} 个，符合条件 {len(filtered)} 个")
     
     return filtered
 
 
-def create_temp_fasta(filtered_sequences: Dict[str, Tuple[str, int, str]]) -> str:
+def create_temp_fasta(filtered_sequences: Dict[str, Tuple[str, int, str, float, int, int]]) -> str:
     """
     创建临时FASTA文件，包含所有筛选后的序列
     
@@ -174,7 +258,7 @@ def create_temp_fasta(filtered_sequences: Dict[str, Tuple[str, int, str]]) -> st
     
     print("📝 创建临时FASTA文件用于CD-HIT聚类...")
     
-    for basename, (file_path, length, file_type) in filtered_sequences.items():
+    for basename, (file_path, length, file_type, completeness, actual_atoms, expected_atoms) in filtered_sequences.items():
         # 读取序列内容
         if file_type == 'fasta':
             sequence = read_fasta_sequence(file_path)
@@ -279,9 +363,9 @@ def parse_cdhit_output(output_fasta: str) -> Set[str]:
     return representative_ids
 
 
-def filter_by_similarity(filtered_sequences: Dict[str, Tuple[str, int, str]], 
+def filter_by_similarity(filtered_sequences: Dict[str, Tuple[str, int, str, float, int, int]], 
                         similarity_threshold: float = 0.8,
-                        threads: int = 4) -> Dict[str, Tuple[str, int, str]]:
+                        threads: int = 4) -> Dict[str, Tuple[str, int, str, float, int, int]]:
     """
     使用CD-HIT进行序列相似度筛选
     
@@ -296,7 +380,7 @@ def filter_by_similarity(filtered_sequences: Dict[str, Tuple[str, int, str]],
     if not filtered_sequences:
         return filtered_sequences
     
-    print(f"\n🧬 第三步: 序列去冗余 (相似度阈值: {similarity_threshold*100}%)")
+    print(f"\n🧬 第四步: 序列去冗余 (相似度阈值: {similarity_threshold*100}%)")
     print("-" * 60)
     
     # 创建临时FASTA文件
@@ -334,7 +418,7 @@ def filter_by_similarity(filtered_sequences: Dict[str, Tuple[str, int, str]],
         raise
 
 
-def copy_related_files(data_dir: str, filtered_sequences: Dict[str, Tuple[str, int, str]], 
+def copy_related_files(data_dir: str, filtered_sequences: Dict[str, Tuple[str, int, str, float, int, int]], 
                       output_dir: str) -> Dict[str, List[str]]:
     """
     复制符合条件的序列相关的所有文件到输出目录
@@ -360,8 +444,8 @@ def copy_related_files(data_dir: str, filtered_sequences: Dict[str, Tuple[str, i
     print("🚚 开始复制文件...")
     print("-" * 80)
     
-    for basename, (file_path, length, file_type) in filtered_sequences.items():
-        print(f"\n📁 处理 {basename} ({length}nt):")
+    for basename, (file_path, length, file_type, completeness, actual_atoms, expected_atoms) in filtered_sequences.items():
+        print(f"\n📁 处理 {basename} ({length}nt, 完整性: {completeness:.1%}):")
         
         # 复制原始序列文件
         if file_type == 'fasta':
@@ -421,9 +505,10 @@ def copy_related_files(data_dir: str, filtered_sequences: Dict[str, Tuple[str, i
 
 
 def generate_summary_report(original_count: int, length_filtered_count: int,
-                           final_sequences: Dict[str, Tuple[str, int, str]], 
+                           final_sequences: Dict[str, Tuple[str, int, str, float, int, int]], 
                            copy_stats: Dict[str, List[str]], 
                            similarity_threshold: float,
+                           min_completeness: float,
                            output_file: str = "filter_summary.txt"):
     """生成筛选和复制的汇总报告"""
     with open(output_file, 'w', encoding='utf-8') as f:
@@ -432,11 +517,12 @@ def generate_summary_report(original_count: int, length_filtered_count: int,
         
         f.write(f"筛选条件:\n")
         f.write(f"  - 长度范围: 16-256nt\n")
+        f.write(f"  - 原子完整性: ≥{min_completeness:.1%}\n")
         f.write(f"  - 序列相似度: <{similarity_threshold*100}%\n\n")
         
         f.write(f"筛选流程:\n")
         f.write(f"  1. 原始序列数: {original_count}\n")
-        f.write(f"  2. 长度筛选后: {length_filtered_count}\n")
+        f.write(f"  2. 长度+完整性筛选后: {length_filtered_count}\n")
         f.write(f"  3. 去冗余后: {len(final_sequences)}\n\n")
         
         f.write("长度分布:\n")
@@ -444,12 +530,24 @@ def generate_summary_report(original_count: int, length_filtered_count: int,
         
         # 统计长度分布
         length_counts = defaultdict(int)
-        for _, (_, length, _) in final_sequences.items():
+        for _, (_, length, _, _, _, _) in final_sequences.items():
             length_range = f"{(length//10)*10}-{(length//10)*10+9}"
             length_counts[length_range] += 1
         
         for length_range in sorted(length_counts.keys(), key=lambda x: int(x.split('-')[0])):
             f.write(f"{length_range}nt: {length_counts[length_range]} 个\n")
+        
+        f.write("\n完整性分布:\n")
+        f.write("-" * 40 + "\n")
+        
+        # 统计完整性分布
+        completeness_counts = defaultdict(int)
+        for _, (_, _, _, completeness, _, _) in final_sequences.items():
+            completeness_range = f"{int(completeness*10)*10}-{(int(completeness*10)*10+9)}%"
+            completeness_counts[completeness_range] += 1
+        
+        for completeness_range in sorted(completeness_counts.keys(), key=lambda x: int(x.split('-')[0])):
+            f.write(f"{completeness_range}: {completeness_counts[completeness_range]} 个\n")
         
         f.write("\n复制文件统计:\n")
         f.write("-" * 40 + "\n")
@@ -457,46 +555,49 @@ def generate_summary_report(original_count: int, length_filtered_count: int,
             f.write(f"{file_type}: {len(files)} 个文件\n")
         
         f.write("\n最终保留的序列列表:\n")
-        f.write("-" * 40 + "\n")
-        f.write(f"{'序列名':<20} {'长度':<8} {'类型':<8}\n")
-        f.write("-" * 40 + "\n")
+        f.write("-" * 80 + "\n")
+        f.write(f"{'序列名':<20} {'长度':<8} {'完整性':<10} {'实际原子':<10} {'预期原子':<10} {'类型':<8}\n")
+        f.write("-" * 80 + "\n")
         
-        for basename, (_, length, file_type) in sorted(final_sequences.items()):
-            f.write(f"{basename:<20} {length:<8} {file_type:<8}\n")
+        for basename, (_, length, file_type, completeness, actual_atoms, expected_atoms) in sorted(final_sequences.items()):
+            f.write(f"{basename:<20} {length:<8} {completeness:.1%} {actual_atoms:<10} {expected_atoms:<10} {file_type:<8}\n")
     
     print(f"📄 已生成汇总报告: {output_file}")
 
 
 def main():
     """主函数"""
-    parser = argparse.ArgumentParser(description="根据序列长度筛选RNA数据并进行去冗余")
+    parser = argparse.ArgumentParser(description="根据序列长度和原子完整性筛选RNA数据并进行去冗余")
     
-    parser.add_argument("--input_dir", type=str, default="../RNA3D_DATA", 
-                       help="输入数据目录路径 (默认: ./RNA3D_DATA)")
-    parser.add_argument("--output_dir", type=str, default="../processed_data",
-                       help="输出数据目录路径 (默认: ./processed_data)")
+    parser.add_argument("--input_dir", type=str, 
+                       help="输入数据目录路径")
+    parser.add_argument("--output_dir", type=str,
+                       help="输出数据目录路径")
     parser.add_argument("--min_length", type=int, default=16,
                        help="最小序列长度 (默认: 16)")
     parser.add_argument("--max_length", type=int, default=256,
                        help="最大序列长度 (默认: 256)")
+    parser.add_argument("--min_completeness", type=float, default=0.8,
+                       help="最小原子完整性阈值 (默认: 0.8, 即80%%)")
     parser.add_argument("--similarity", type=float, default=0.8,
-                       help="序列相似度阈值 (默认: 0.8, 即80%)")
+                       help="序列相似度阈值 (默认: 0.8, 即80%%)")
     parser.add_argument("--threads", type=int, default=4,
                        help="CD-HIT使用的线程数 (默认: 4)")
     parser.add_argument("--dry_run", action="store_true",
                        help="只分析不复制文件")
     parser.add_argument("--skip_similarity", action="store_true",
-                       help="跳过相似度筛选，只进行长度筛选")
+                       help="跳过相似度筛选，只进行长度和完整性筛选")
     parser.add_argument("--report", type=str, default="filter_summary.txt",
                        help="汇总报告文件名 (默认: filter_summary.txt)")
     
     args = parser.parse_args()
     
-    print("🧬 RNA数据筛选工具 (长度 + 相似度)")
+    print("🧬 RNA数据筛选工具 (长度 + 完整性 + 相似度)")
     print("=" * 60)
     print(f"📁 输入目录: {args.input_dir}")
     print(f"📁 输出目录: {args.output_dir}")
     print(f"📏 长度范围: {args.min_length}-{args.max_length}nt")
+    print(f"🔬 原子完整性: ≥{args.min_completeness:.1%}")
     print(f"🔬 相似度阈值: <{args.similarity*100}% {'(跳过)' if args.skip_similarity else ''}")
     print(f"🧵 线程数: {args.threads}")
     print(f"🚫 仅分析模式: {args.dry_run}")
@@ -508,15 +609,15 @@ def main():
             raise FileNotFoundError(f"输入目录不存在: {args.input_dir}")
         
         # 扫描所有序列文件
-        print("\n🔍 第一步: 扫描所有序列文件...")
-        all_sequences = scan_all_sequences(args.input_dir)
+        print("\n🔍 第一步: 扫描所有序列文件和PDB文件...")
+        all_sequences = scan_all_sequences(args.input_dir, args.min_completeness)
         print(f"📊 找到 {len(all_sequences)} 个序列文件")
         original_count = len(all_sequences)
         
-        # 根据长度筛选
-        print("\n🔍 第二步: 根据长度筛选...")
-        length_filtered = filter_by_length(
-            all_sequences, args.min_length, args.max_length
+        # 根据长度和完整性筛选
+        print("\n🔍 第二步: 根据长度和原子完整性筛选...")
+        length_filtered = filter_by_length_and_completeness(
+            all_sequences, args.min_length, args.max_length, args.min_completeness
         )
         length_filtered_count = len(length_filtered)
         
@@ -540,13 +641,13 @@ def main():
             # 生成报告
             generate_summary_report(
                 original_count, length_filtered_count, 
-                final_sequences, copy_stats, args.similarity, args.report
+                final_sequences, copy_stats, args.similarity, args.min_completeness, args.report
             )
             
             print("\n" + "=" * 60)
             print("✅ 数据筛选和复制完成!")
             print(f"📊 原始序列: {original_count} 个")
-            print(f"📊 长度筛选后: {length_filtered_count} 个")
+            print(f"📊 长度+完整性筛选后: {length_filtered_count} 个")
             print(f"📊 去冗余后: {len(final_sequences)} 个")
             print(f"📁 输出目录: {args.output_dir}")
             print(f"📄 汇总报告: {args.report}")
@@ -555,14 +656,21 @@ def main():
             print("\n" + "=" * 60)
             print("🚫 仅分析模式 - 未复制文件")
             print(f"📊 原始序列: {original_count} 个")
-            print(f"📊 长度筛选后: {length_filtered_count} 个")
+            print(f"📊 长度+完整性筛选后: {length_filtered_count} 个")
             print(f"📊 去冗余后: {len(final_sequences)} 个")
             
             # 显示一些统计信息
             if final_sequences:
-                lengths = [length for _, length, _ in final_sequences.values()]
+                lengths = [length for _, length, _, _, _, _ in final_sequences.values()]
+                completeness_values = [completeness for _, _, _, completeness, _, _ in final_sequences.values()]
+                actual_atoms_list = [actual_atoms for _, _, _, _, actual_atoms, _ in final_sequences.values()]
+                expected_atoms_list = [expected_atoms for _, _, _, _, _, expected_atoms in final_sequences.values()]
                 print(f"📏 长度范围: {min(lengths)}-{max(lengths)}nt")
                 print(f"📏 平均长度: {sum(lengths)/len(lengths):.1f}nt")
+                print(f"🔬 完整性范围: {min(completeness_values):.1%}-{max(completeness_values):.1%}")
+                print(f"🔬 平均完整性: {sum(completeness_values)/len(completeness_values):.1%}")
+                print(f"🔬 实际原子数范围: {min(actual_atoms_list)}-{max(actual_atoms_list)}")
+                print(f"🔬 预期原子数范围: {min(expected_atoms_list)}-{max(expected_atoms_list)}")
         else:
             print("\n" + "=" * 60)
             print("⚠️  没有找到符合条件的序列")

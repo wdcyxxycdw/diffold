@@ -132,7 +132,7 @@ class MaskValidator:
         
         # 记录日志
         if self.enable_logging:
-            logger.info(f"Batch mask验证完成: valid={results['is_valid']}, "
+            logger.debug(f"Batch mask验证完成: valid={results['is_valid']}, "
                        f"warnings={len(results['warnings'])}, errors={len(results['errors'])}")
         
         return results
@@ -212,7 +212,7 @@ class MaskValidator:
         results['statistics']['valid_sequences'] = (mask.sum(dim=-1) > 0).sum().item()
         
         if self.enable_logging:
-            logger.info(f"EDM输入mask验证: valid={results['is_valid']}, "
+            logger.debug(f"EDM输入mask验证: valid={results['is_valid']}, "
                        f"avg_consistency={results['statistics']['avg_mask_consistency']:.3f}")
         
         return results
