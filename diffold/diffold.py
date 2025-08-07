@@ -583,7 +583,18 @@ class Diffold(nn.Module):
         af_in = None
         atom_mask = None
         if target_coords is not None:
-            atom_pos_list = [target_coords[0]]
+            # 🔧 添加质心归零处理
+            logger.debug("开始对目标坐标进行质心归零处理")
+            
+            # 对目标坐标进行质心归零
+            target_coords_centered = target_coords.clone()
+            centroid = torch.mean(target_coords_centered[0], dim=0, keepdim=True)  # [1, 3]
+            # 质心归零
+            target_coords_centered[0] = target_coords_centered[0] - centroid
+            logger.debug(f"样本 {i}: 质心 = {centroid.squeeze().tolist()}") 
+            logger.info(f"目标坐标质心归零完成，形状: {target_coords_centered.shape}")
+            
+            atom_pos_list = [target_coords_centered[0]]
             af_in, atom_mask = process_alphafold3_input(
                 ss_rna=[seq[0]],
                 atom_pos=atom_pos_list,
