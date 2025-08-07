@@ -7,7 +7,7 @@ data:
   max_sequence_length: 256
   num_workers: 4
   use_msa: true
-  fold: 0  # 交叉验证折数 (0-9)
+  fold: 3  # 交叉验证折数 (0-9)
 
 # 模型配置
 model:
@@ -38,7 +38,7 @@ training:
   
   # 验证配置
   validate_every: 1
-  early_stopping_patience: 10
+  early_stopping_patience: 40
 
 # 输出配置
 output:

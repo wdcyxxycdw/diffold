@@ -449,7 +449,7 @@ class RNAEvaluationMetrics:
         
         # 收集所有GPU的指标列表
         all_metrics = [None for _ in range(world_size)]
-        dist.all_gather_object(all_metrics, local_metrics, device=device, group=None)
+        dist.all_gather_object(all_metrics, local_metrics, group=None)
         
         # 合并所有GPU的指标
         global_metrics = {}

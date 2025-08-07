@@ -904,7 +904,7 @@ class DiffoldTrainer:
         
         # 确保所有GPU都重置了指标后再同步
         if self.world_size > 1:
-            dist.barrier(device_ids=[self.local_rank] if self.device.type == 'cuda' else None)
+            dist.barrier()
         
         # 测试模式下限制batch数量
         if self.config.test_mode:
@@ -1317,7 +1317,7 @@ class DiffoldTrainer:
             if self.enhanced_metrics:
                 # 确保所有GPU都计算完指标后再同步
                 if self.world_size > 1:
-                    dist.barrier(device_ids=[self.local_rank] if self.device.type == 'cuda' else None)  # 等待所有GPU完成指标计算
+                    dist.barrier()  # 等待所有GPU完成指标计算
                 
                 train_metrics = self.enhanced_metrics['train'].compute_metrics()
                 val_metrics = self.enhanced_metrics['val'].compute_metrics() if valid_loss is not None else {}
@@ -1479,7 +1479,7 @@ class DiffoldTrainer:
         # DDP结束
         if self.world_size > 1:
             # 确保所有进程都完成后再销毁进程组
-            dist.barrier(device_ids=[self.local_rank] if self.device.type == 'cuda' else None)
+            dist.barrier()
             dist.destroy_process_group()
 
     def _sync_metrics_across_gpus(self, metrics: Dict[str, float]) -> Dict[str, float]:
@@ -1489,7 +1489,7 @@ class DiffoldTrainer:
         
         # 收集所有GPU的指标
         all_metrics = [None for _ in range(self.world_size)]
-        dist.all_gather_object(all_metrics, metrics, device=self.device, group=None)
+        dist.all_gather_object(all_metrics, metrics, group=None)
         
         # 合并所有GPU的指标
         global_metrics = {}
@@ -1526,7 +1526,7 @@ class DiffoldTrainer:
         # 收集所有GPU的损失和batch数量
         loss_tensor = torch.tensor([local_loss, local_batches], device=self.device)
         all_losses = [torch.zeros_like(loss_tensor) for _ in range(self.world_size)]
-        dist.all_gather(all_losses, loss_tensor, device=self.device, group=None)
+        dist.all_gather(all_losses, loss_tensor, group=None)
         
         # 计算全局平均损失
         total_global_loss = 0.0
@@ -1552,8 +1552,8 @@ class DiffoldTrainer:
         all_train_losses = [torch.zeros_like(train_tensor) for _ in range(self.world_size)]
         all_valid_losses = [torch.zeros_like(valid_tensor) for _ in range(self.world_size)]
         
-        dist.all_gather(all_train_losses, train_tensor, device=self.device, group=None)
-        dist.all_gather(all_valid_losses, valid_tensor, device=self.device, group=None)
+        dist.all_gather(all_train_losses, train_tensor, group=None)
+        dist.all_gather(all_valid_losses, valid_tensor, group=None)
         
         # 检查是否所有GPU的损失值一致
         train_losses = [loss.item() for loss in all_train_losses]
@@ -1862,7 +1862,7 @@ def main():
     # DDP结束
     if world_size > 1:
         # 确保所有进程都完成后再销毁进程组
-        dist.barrier(device_ids=[local_rank] if device.type == 'cuda' else None)
+        dist.barrier()
         dist.destroy_process_group()
 
 
