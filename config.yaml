@@ -17,9 +17,9 @@ model:
 training:
   num_epochs: 100
   learning_rate: 0.00005
-  weight_decay: 0.0
+  weight_decay: 0.0001
   grad_clip_norm: 1.0
-  warmup_steps: 2000  # 预热步数（基于step而不是epoch）
+  warmup_steps: 1000  # 预热步数（基于step而不是epoch）
   
   # 调度器配置
   scheduler_type: "cosine"  # "cosine", "plateau"
@@ -38,14 +38,14 @@ training:
   
   # 验证配置
   validate_every: 1
-  early_stopping_patience: 40
+  early_stopping_patience: 20
 
 # 输出配置
 output:
   output_dir: "./output"
   checkpoint_dir: "./checkpoints"
   save_every: 1
-  keep_last_n_checkpoints: 100
+  keep_last_n_checkpoints: 20
 
 # 设备配置
 device:

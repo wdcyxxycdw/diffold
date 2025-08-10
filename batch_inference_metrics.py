@@ -11,7 +11,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Callable
 import pandas as pd
 import torch
 import numpy as np
@@ -25,6 +25,136 @@ from rhofold.utils import get_device, timing
 
 # 导入PDB转换功能
 from diffold.output import diffold_coords_to_pdb, validate_diffold_output
+
+# 采样结果筛选函数类型定义
+SampleSelectionFunc = Callable[[List[Dict[str, Any]]], int]
+
+# ========== 采样结果筛选策略函数 ==========
+
+def select_best_by_rmsd(samples: List[Dict[str, Any]]) -> int:
+    """
+    根据RMSD选择最佳采样（默认策略）
+    返回RMSD最小的采样索引
+    """
+    if not samples:
+        raise ValueError("样本列表为空")
+    
+    best_idx = 0
+    best_rmsd = samples[0]['rmsd']
+    
+    for i, sample in enumerate(samples):
+        if sample['rmsd'] < best_rmsd:
+            best_rmsd = sample['rmsd']
+            best_idx = i
+    
+    return best_idx
+
+def select_best_by_tm_score(samples: List[Dict[str, Any]]) -> int:
+    """
+    根据TM分数选择最佳采样
+    返回TM分数最高的采样索引
+    """
+    if not samples:
+        raise ValueError("样本列表为空")
+    
+    best_idx = 0
+    best_tm = samples[0]['metrics'].get('avg_tm_score', 0.0)
+    
+    for i, sample in enumerate(samples):
+        tm_score = sample['metrics'].get('avg_tm_score', 0.0)
+        if tm_score > best_tm:
+            best_tm = tm_score
+            best_idx = i
+    
+    return best_idx
+
+def select_best_by_lddt(samples: List[Dict[str, Any]]) -> int:
+    """
+    根据lDDT分数选择最佳采样
+    返回lDDT分数最高的采样索引
+    """
+    if not samples:
+        raise ValueError("样本列表为空")
+    
+    best_idx = 0
+    best_lddt = samples[0]['metrics'].get('avg_lddt', 0.0)
+    
+    for i, sample in enumerate(samples):
+        lddt_score = sample['metrics'].get('avg_lddt', 0.0)
+        if lddt_score > best_lddt:
+            best_lddt = lddt_score
+            best_idx = i
+    
+    return best_idx
+
+def select_best_by_clash_score(samples: List[Dict[str, Any]]) -> int:
+    """
+    根据冲突分数选择最佳采样
+    返回冲突分数最低的采样索引
+    """
+    if not samples:
+        raise ValueError("样本列表为空")
+    
+    best_idx = 0
+    best_clash = samples[0]['metrics'].get('avg_clash_score', float('inf'))
+    
+    for i, sample in enumerate(samples):
+        clash_score = sample['metrics'].get('avg_clash_score', float('inf'))
+        if clash_score < best_clash:
+            best_clash = clash_score
+            best_idx = i
+    
+    return best_idx
+
+def select_best_by_composite_score(samples: List[Dict[str, Any]]) -> int:
+    """
+    根据综合分数选择最佳采样
+    综合分数 = (normalized_tm_score + normalized_lddt - normalized_rmsd - normalized_clash) / 4
+    """
+    if not samples:
+        raise ValueError("样本列表为空")
+    
+    # 提取所有指标
+    rmsd_values = [s['rmsd'] for s in samples]
+    tm_values = [s['metrics'].get('avg_tm_score', 0.0) for s in samples]
+    lddt_values = [s['metrics'].get('avg_lddt', 0.0) for s in samples]
+    clash_values = [s['metrics'].get('avg_clash_score', 0.0) for s in samples]
+    
+    # 归一化（避免除零）
+    def safe_normalize(values, reverse=False):
+        if len(set(values)) <= 1:  # 所有值相同
+            return [0.0] * len(values)
+        min_val, max_val = min(values), max(values)
+        if reverse:
+            return [(max_val - v) / (max_val - min_val) for v in values]
+        else:
+            return [(v - min_val) / (max_val - min_val) for v in values]
+    
+    norm_rmsd = safe_normalize(rmsd_values, reverse=True)  # RMSD越小越好
+    norm_tm = safe_normalize(tm_values, reverse=False)     # TM分数越大越好
+    norm_lddt = safe_normalize(lddt_values, reverse=False) # lDDT越大越好
+    norm_clash = safe_normalize(clash_values, reverse=True) # 冲突分数越小越好
+    
+    # 计算综合分数
+    best_idx = 0
+    best_score = norm_rmsd[0] + norm_tm[0] + norm_lddt[0] + norm_clash[0]
+    
+    for i in range(1, len(samples)):
+        composite_score = norm_rmsd[i] + norm_tm[i] + norm_lddt[i] + norm_clash[i]
+        if composite_score > best_score:
+            best_score = composite_score
+            best_idx = i
+    
+    return best_idx
+
+# 预定义策略映射
+SELECTION_STRATEGIES = {
+    'rmsd': select_best_by_rmsd,
+    'tm_score': select_best_by_tm_score,
+    'lddt': select_best_by_lddt,
+    'clash_score': select_best_by_clash_score,
+    'composite': select_best_by_composite_score,
+}
 
 def setup_logging(output_dir: str, log_level: str = "INFO"):
     """设置日志"""
@@ -122,8 +252,11 @@ def compute_metrics_for_sample(model: Diffold,
                              sample_name: str,
                              metrics_calculator: RNAEvaluationMetrics,
                              output_dir: str,
+                             num_sampling: int,
+                             save_all_samples: bool,
+                             selection_func: SampleSelectionFunc,
                              logger: logging.Logger) -> Dict[str, Any]:
-    """计算单个样本的指标并保存PDB文件"""
+    """计算单个样本的指标并保存PDB文件（支持多次采样）"""
     try:
         # 准备输入数据
         device = next(model.parameters()).device  # 获取模型所在的设备
@@ -140,37 +273,8 @@ def compute_metrics_for_sample(model: Diffold,
         if rna_fm_tokens is not None:
             rna_fm_tokens = rna_fm_tokens.to(device)
         
-        # 模型推理
-        with torch.no_grad():
-            result = model(
-                tokens=tokens,
-                rna_fm_tokens=rna_fm_tokens,
-                seq=sequences,
-                target_coords=coordinates,
-                missing_atom_mask=missing_atom_masks
-            )
-        
-        if result is None:
-            logger.warning(f"样本 {sample_name}: 模型推理返回None")
-            return {
-                'sample_name': sample_name,
-                'status': 'failed',
-                'error': 'model_inference_failed'
-            }
-        
-        # 提取预测坐标和目标坐标
-        predicted_coords = result.get('predicted_coords')
+        # 获取目标坐标
         target_coords = coordinates
-        atom_mask = result.get('atom_mask', None)
-        
-        if predicted_coords is None:
-            logger.warning(f"样本 {sample_name}: 未获取到预测坐标")
-            return {
-                'sample_name': sample_name,
-                'status': 'failed',
-                'error': 'no_predicted_coords'
-            }
-        
         if target_coords is None:
             logger.warning(f"样本 {sample_name}: 未获取到目标坐标")
             return {
@@ -179,69 +283,175 @@ def compute_metrics_for_sample(model: Diffold,
                 'error': 'no_target_coords'
             }
         
-        # 计算指标
-        metrics_calculator.reset()  # 重置指标计算器
-        metrics_calculator.update(
-            loss=0.0,  # 推理时没有损失
-            batch_size=1,
-            predicted_coords=predicted_coords,
-            target_coords=target_coords
-        )
+        # 多次采样
+        all_samples = []
         
-        # 获取计算结果
-        metrics = metrics_calculator.compute_metrics()
+        logger.debug(f"样本 {sample_name}: 开始 {num_sampling} 次采样")
         
-        # 获取详细的指标数据
-        detailed_metrics = {}
-        if hasattr(metrics_calculator, 'rmsd_values') and metrics_calculator.rmsd_values:
-            detailed_metrics['rmsd_values'] = metrics_calculator.rmsd_values
-        if hasattr(metrics_calculator, 'tm_scores') and metrics_calculator.tm_scores:
-            detailed_metrics['tm_scores'] = metrics_calculator.tm_scores
-        if hasattr(metrics_calculator, 'lddt_scores') and metrics_calculator.lddt_scores:
-            detailed_metrics['lddt_scores'] = metrics_calculator.lddt_scores
-        if hasattr(metrics_calculator, 'clash_scores') and metrics_calculator.clash_scores:
-            detailed_metrics['clash_scores'] = metrics_calculator.clash_scores
-        
-        # 保存PDB文件
-        pdb_file_path = None
-        try:
-            # 创建PDB输出目录
-            pdb_output_dir = Path(output_dir) / "pdb_files"
-            pdb_output_dir.mkdir(parents=True, exist_ok=True)
+        for sample_idx in range(num_sampling):
+            # 模型推理（每次采样可能产生不同结果）
+            with torch.no_grad():
+                result = model(
+                    tokens=tokens,
+                    rna_fm_tokens=rna_fm_tokens,
+                    seq=sequences,
+                    target_coords=coordinates,
+                    missing_atom_mask=missing_atom_masks
+                )
             
-            # 生成PDB文件路径
-            pdb_file_path = pdb_output_dir / f"{sample_name}_predicted.pdb"
+            if result is None:
+                logger.warning(f"样本 {sample_name} 采样 {sample_idx+1}: 模型推理返回None")
+                continue
             
-            # 获取序列
-            sequence = sequences[0] if sequences else ""
+            # 提取预测坐标
+            predicted_coords = result.get('predicted_coords')
+            atom_mask = result.get('atom_mask', None)
             
-            # 保存预测的PDB文件
-            diffold_coords_to_pdb(
+            if predicted_coords is None:
+                logger.warning(f"样本 {sample_name} 采样 {sample_idx+1}: 未获取到预测坐标")
+                continue
+            
+            # 计算当前采样的指标
+            temp_metrics_calculator = RNAEvaluationMetrics()
+            temp_metrics_calculator.update(
+                loss=0.0,
+                batch_size=1,
                 predicted_coords=predicted_coords,
-                sequence=sequence,
-                output_path=str(pdb_file_path),
-                atom_mask=atom_mask,
-                logger_instance=logger
+                target_coords=target_coords
             )
             
-            logger.debug(f"样本 {sample_name}: PDB文件已保存到 {pdb_file_path}")
+            sample_metrics = temp_metrics_calculator.compute_metrics()
+            current_rmsd = sample_metrics.get('avg_rmsd', float('inf'))
+            
+            # 保存采样结果
+            sample_result = {
+                'sample_idx': sample_idx,
+                'predicted_coords': predicted_coords,
+                'atom_mask': atom_mask,
+                'metrics': sample_metrics,
+                'rmsd': current_rmsd
+            }
+            
+            # 获取详细指标
+            detailed_metrics = {}
+            if hasattr(temp_metrics_calculator, 'rmsd_values') and temp_metrics_calculator.rmsd_values:
+                detailed_metrics['rmsd_values'] = temp_metrics_calculator.rmsd_values
+            if hasattr(temp_metrics_calculator, 'tm_scores') and temp_metrics_calculator.tm_scores:
+                detailed_metrics['tm_scores'] = temp_metrics_calculator.tm_scores
+            if hasattr(temp_metrics_calculator, 'lddt_scores') and temp_metrics_calculator.lddt_scores:
+                detailed_metrics['lddt_scores'] = temp_metrics_calculator.lddt_scores
+            if hasattr(temp_metrics_calculator, 'clash_scores') and temp_metrics_calculator.clash_scores:
+                detailed_metrics['clash_scores'] = temp_metrics_calculator.clash_scores
+            
+            sample_result['detailed_metrics'] = detailed_metrics
+            all_samples.append(sample_result)
+        
+        if not all_samples:
+            logger.warning(f"样本 {sample_name}: 所有采样都失败")
+            return {
+                'sample_name': sample_name,
+                'status': 'failed',
+                'error': 'all_sampling_failed'
+            }
+        
+        # 使用筛选函数选择最佳采样
+        try:
+            best_sample_idx = selection_func(all_samples)
+            best_sample = all_samples[best_sample_idx]
+            best_rmsd = best_sample['rmsd']
+            
+            logger.debug(f"样本 {sample_name}: 筛选函数选择采样 {best_sample_idx+1}, RMSD: {best_rmsd:.4f}")
             
         except Exception as e:
-            logger.warning(f"样本 {sample_name}: PDB文件保存失败: {e}")
-            pdb_file_path = None
+            logger.warning(f"样本 {sample_name}: 筛选函数执行失败: {e}, 使用默认RMSD策略")
+            # 回退到默认的RMSD策略
+            best_sample_idx = select_best_by_rmsd(all_samples)
+            best_sample = all_samples[best_sample_idx]
+            best_rmsd = best_sample['rmsd']
         
-        # 添加样本信息
+        # 保存PDB文件
+        pdb_file_paths = []
+        
+        # 创建PDB输出目录
+        pdb_output_dir = Path(output_dir) / "pdb_files"
+        pdb_output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 获取序列
+        sequence = sequences[0] if sequences else ""
+        
+        # 保存最佳采样的PDB文件
+        best_pdb_path = pdb_output_dir / f"{sample_name}_best.pdb"
+        try:
+            diffold_coords_to_pdb(
+                predicted_coords=best_sample['predicted_coords'],
+                sequence=sequence,
+                output_path=str(best_pdb_path),
+                atom_mask=best_sample['atom_mask'],
+                logger_instance=logger
+            )
+            pdb_file_paths.append(str(best_pdb_path))
+            logger.debug(f"样本 {sample_name}: 最佳PDB文件已保存到 {best_pdb_path}")
+        except Exception as e:
+            logger.warning(f"样本 {sample_name}: 最佳PDB文件保存失败: {e}")
+        
+        # 如果需要保存所有采样结果
+        if save_all_samples:
+            for i, sample_result in enumerate(all_samples):
+                sample_pdb_path = pdb_output_dir / f"{sample_name}_sample_{i+1}.pdb"
+                try:
+                    diffold_coords_to_pdb(
+                        predicted_coords=sample_result['predicted_coords'],
+                        sequence=sequence,
+                        output_path=str(sample_pdb_path),
+                        atom_mask=sample_result['atom_mask'],
+                        logger_instance=logger
+                    )
+                    pdb_file_paths.append(str(sample_pdb_path))
+                except Exception as e:
+                    logger.warning(f"样本 {sample_name} 采样 {i+1}: PDB文件保存失败: {e}")
+        
+        # 准备返回结果
         result_dict = {
             'sample_name': sample_name,
             'status': 'success',
             'sequence_length': len(sequences[0]) if sequences else 0,
             'sequence': sequences[0] if sequences else "",
-            'predicted_coords_shape': list(predicted_coords.shape) if predicted_coords is not None else None,
-            'target_coords_shape': list(target_coords.shape) if target_coords is not None else None,
-            'pdb_file_path': str(pdb_file_path) if pdb_file_path else None,
-            **metrics,
-            'detailed_metrics': detailed_metrics
+            'num_sampling': num_sampling,
+            'successful_samples': len(all_samples),
+            'best_sample_idx': best_sample['sample_idx'],
+            'best_rmsd': best_rmsd,
+            'predicted_coords_shape': list(best_sample['predicted_coords'].shape),
+            'target_coords_shape': list(target_coords.shape),
+            'pdb_file_paths': pdb_file_paths,
+            'best_pdb_path': str(best_pdb_path) if pdb_file_paths else None,
+            # 使用最佳采样的指标作为主要指标
+            **best_sample['metrics'],
+            'detailed_metrics': best_sample['detailed_metrics']
         }
+        
+        # 如果保存所有采样，添加所有采样的信息
+        if save_all_samples:
+            all_samples_info = []
+            for sample_result in all_samples:
+                sample_info = {
+                    'sample_idx': sample_result['sample_idx'],
+                    'rmsd': sample_result['rmsd'],
+                    'metrics': sample_result['metrics'],
+                    'detailed_metrics': sample_result['detailed_metrics']
+                }
+                all_samples_info.append(sample_info)
+            result_dict['all_samples'] = all_samples_info
+            
+            # 添加采样统计信息
+            rmsd_values = [s['rmsd'] for s in all_samples]
+            result_dict['sampling_stats'] = {
+                'rmsd_mean': np.mean(rmsd_values),
+                'rmsd_std': np.std(rmsd_values),
+                'rmsd_min': np.min(rmsd_values),
+                'rmsd_max': np.max(rmsd_values)
+            }
+        
+        logger.debug(f"样本 {sample_name}: 完成 {len(all_samples)}/{num_sampling} 次成功采样，最佳RMSD: {best_rmsd:.4f}")
         
         return result_dict
         
@@ -293,7 +503,7 @@ def generate_report(results: List[Dict[str, Any]], report_file: Path, logger: lo
     failed_results = [r for r in results if r['status'] == 'failed']
     
     with open(report_file, 'w') as f:
-        f.write("批量推理指标计算报告\n")
+        f.write("批量推理指标计算报告（多次采样版本）\n")
         f.write("=" * 50 + "\n\n")
         
         f.write(f"总样本数: {len(results)}\n")
@@ -302,11 +512,47 @@ def generate_report(results: List[Dict[str, Any]], report_file: Path, logger: lo
         f.write(f"成功率: {len(successful_results)/len(results)*100:.2f}%\n\n")
         
         if successful_results:
-            # 计算指标统计
-            metrics_keys = ['avg_rmsd', 'avg_tm_score', 'avg_lddt', 'avg_clash_score']
+            # 采样统计信息
+            f.write("采样统计:\n")
+            f.write("-" * 30 + "\n")
+            
+            # 获取采样信息
+            num_sampling_values = [r.get('num_sampling', 1) for r in successful_results]
+            successful_samples_values = [r.get('successful_samples', 1) for r in successful_results]
+            
+            if num_sampling_values:
+                f.write(f"每样本采样次数: {num_sampling_values[0]}\n")
+                f.write(f"平均成功采样数: {np.mean(successful_samples_values):.2f}\n")
+                f.write(f"采样成功率: {np.mean(successful_samples_values)/num_sampling_values[0]*100:.2f}%\n\n")
+            
+            # 最佳RMSD统计
+            best_rmsd_values = [r.get('best_rmsd', r.get('avg_rmsd', float('inf'))) for r in successful_results]
+            if best_rmsd_values:
+                f.write("最佳RMSD统计:\n")
+                f.write(f"  平均值: {np.mean(best_rmsd_values):.4f}\n")
+                f.write(f"  中位数: {np.median(best_rmsd_values):.4f}\n")
+                f.write(f"  标准差: {np.std(best_rmsd_values):.4f}\n")
+                f.write(f"  最小值: {np.min(best_rmsd_values):.4f}\n")
+                f.write(f"  最大值: {np.max(best_rmsd_values):.4f}\n\n")
+            
+            # 检查是否有采样统计信息
+            samples_with_stats = [r for r in successful_results if 'sampling_stats' in r]
+            if samples_with_stats:
+                f.write("采样RMSD变异性统计:\n")
+                f.write("-" * 30 + "\n")
+                rmsd_stds = [r['sampling_stats']['rmsd_std'] for r in samples_with_stats]
+                rmsd_ranges = [r['sampling_stats']['rmsd_max'] - r['sampling_stats']['rmsd_min'] for r in samples_with_stats]
+                
+                f.write(f"RMSD标准差的平均值: {np.mean(rmsd_stds):.4f}\n")
+                f.write(f"RMSD标准差的中位数: {np.median(rmsd_stds):.4f}\n")
+                f.write(f"RMSD范围的平均值: {np.mean(rmsd_ranges):.4f}\n")
+                f.write(f"RMSD范围的中位数: {np.median(rmsd_ranges):.4f}\n\n")
+            
+            # 计算其他指标统计
+            metrics_keys = ['avg_tm_score', 'avg_lddt', 'avg_clash_score']
             available_metrics = [key for key in metrics_keys if any(key in r for r in successful_results)]
             
-            f.write("指标统计:\n")
+            f.write("其他指标统计（基于最佳采样）:\n")
             f.write("-" * 30 + "\n")
             
             for metric in available_metrics:
@@ -361,6 +607,13 @@ def main():
     # 可选参数
     parser.add_argument("--max_samples", type=int, default=None,
                        help="最大处理样本数（用于测试）")
+    parser.add_argument("--num_sampling", type=int, default=1,
+                       help="每个样本的采样次数（扩散模型）")
+    parser.add_argument("--save_all_samples", action="store_true", default=False,
+                       help="是否保存所有采样结果")
+    parser.add_argument("--selection_strategy", choices=list(SELECTION_STRATEGIES.keys()), 
+                       default="rmsd",
+                       help="采样结果筛选策略: rmsd(默认), tm_score, lddt, clash_score, composite")
     
     args = parser.parse_args()
     
@@ -375,10 +628,17 @@ def main():
     
     # 设置日志
     logger = setup_logging(args.output_dir, args.log_level)
-    logger.info("开始批量推理和指标计算")
+    logger.info("开始批量推理和指标计算（多次采样版本）")
     logger.info(f"设备: {args.device}")
     logger.info(f"数据目录: {args.data_dir}")
     logger.info(f"输出目录: {args.output_dir}")
+    logger.info(f"每样本采样次数: {args.num_sampling}")
+    logger.info(f"保存所有采样结果: {args.save_all_samples}")
+    logger.info(f"筛选策略: {args.selection_strategy}")
+    
+    # 获取筛选函数
+    selection_func = SELECTION_STRATEGIES[args.selection_strategy]
+    logger.info(f"使用筛选函数: {selection_func.__name__}")
     
     try:
         # 加载模型
@@ -413,6 +673,9 @@ def main():
                 sample_name=sample_name,
                 metrics_calculator=metrics_calculator,
                 output_dir=args.output_dir,
+                num_sampling=args.num_sampling,
+                save_all_samples=args.save_all_samples,
+                selection_func=selection_func,
                 logger=logger
             )
             
@@ -443,12 +706,29 @@ def main():
         logger.info(f"成功样本: {successful_count}")
         logger.info(f"失败样本: {failed_count}")
         logger.info(f"成功率: {successful_count/len(results)*100:.2f}%")
+        
+        # 计算采样统计
+        successful_results = [r for r in results if r['status'] == 'success']
+        if successful_results:
+            total_samples_attempted = sum([r.get('num_sampling', 1) for r in successful_results])
+            total_samples_successful = sum([r.get('successful_samples', 1) for r in successful_results])
+            avg_sampling_success_rate = total_samples_successful / total_samples_attempted * 100
+            
+            logger.info(f"采样统计:")
+            logger.info(f"  每样本采样次数: {args.num_sampling}")
+            logger.info(f"  总采样次数: {total_samples_attempted}")
+            logger.info(f"  成功采样次数: {total_samples_successful}")
+            logger.info(f"  采样成功率: {avg_sampling_success_rate:.2f}%")
+        
         logger.info(f"结果文件:")
         logger.info(f"  JSON: {json_file}")
         logger.info(f"  CSV: {csv_file}")
         logger.info(f"  详细指标: {detailed_metrics_file}")
         logger.info(f"  报告: {report_file}")
         logger.info(f"  PDB文件目录: {Path(args.output_dir) / 'pdb_files'}")
+        
+        if args.save_all_samples:
+            logger.info(f"  注意: 所有采样的PDB文件也已保存")
         
     except Exception as e:
         logger.error(f"批量推理失败: {e}")

@@ -583,18 +583,7 @@ class Diffold(nn.Module):
         af_in = None
         atom_mask = None
         if target_coords is not None:
-            # 🔧 添加质心归零处理
-            logger.debug("开始对目标坐标进行质心归零处理")
-            
-            # 对目标坐标进行质心归零
-            target_coords_centered = target_coords.clone()
-            centroid = torch.mean(target_coords_centered[0], dim=0, keepdim=True)  # [1, 3]
-            # 质心归零
-            target_coords_centered[0] = target_coords_centered[0] - centroid
-            logger.debug(f"样本 {i}: 质心 = {centroid.squeeze().tolist()}") 
-            logger.info(f"目标坐标质心归零完成，形状: {target_coords_centered.shape}")
-            
-            atom_pos_list = [target_coords_centered[0]]
+            atom_pos_list = [target_coords[0]]
             af_in, atom_mask = process_alphafold3_input(
                 ss_rna=[seq[0]],
                 atom_pos=atom_pos_list,
@@ -630,6 +619,21 @@ class Diffold(nn.Module):
         
         # 使用对齐后的af_in
         af_in = af_in_aligned
+
+        # 基于缺失原子掩码/有效原子掩码进行按 batch 的质心归零
+        if af_in.atom_pos is not None:
+            try:
+                pos = af_in.atom_pos  # [B, N, 3]
+                # 优先使用用户提供的 missing_atom_mask（True=缺失，取反为有效）
+                mask_src = None
+                mask_src = (~missing_atom_mask).to(pos.dtype)  # [B, N]
+
+                mask_b = mask_src.unsqueeze(-1)  # [B, N, 1]
+                valid_counts = mask_b.sum(dim=1, keepdim=True).clamp(min=1.0)  # [B, 1, 1]
+                centroid = (pos * mask_b).sum(dim=1, keepdim=True) / valid_counts  # [B, 1, 3]
+                af_in.atom_pos = pos - centroid
+            except Exception as e:
+                logger.warning(f"质心归零时出现异常，跳过归零：{e}")
 
         # 获取设备信息并将所有输入数据移动到正确的设备
         device = tokens.device
