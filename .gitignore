@@ -16,3 +16,10 @@ output/
 *.pt
 batch_inference_output/
 database/
+
+*.lock
+casp/
+
+plots/
+rhofold_test_output/
+.cursor
