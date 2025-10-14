@@ -181,7 +181,7 @@ def build_msa_online(
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description=(
-            "查询RNA序列的MSA并输出为a3m格式。可直接输入原始序列或提供FASTA文件。"
+            "查询RNA序列的MSA并输出为a3m格式。可直接输入原始序列或提供FASTA文件，也支持批量处理。"
         )
     )
     src = parser.add_mutually_exclusive_group(required=True)
@@ -195,11 +195,27 @@ def parse_args(argv=None):
         type=str,
         help="输入FASTA文件路径（包含单条查询序列）",
     )
+    src.add_argument(
+        "--input_dir",
+        type=str,
+        help="输入文件夹路径（批量处理模式，将处理文件夹中所有.fasta/.fa文件）",
+    )
     parser.add_argument(
         "--output_a3m",
         type=str,
         required=True,
-        help="输出a3m文件路径，例如 ./processed_data/rMSA/sample.a3m",
+        help="输出a3m文件路径（单文件模式）或输出目录（批量模式，使用--input_dir时）",
+    )
+    parser.add_argument(
+        "--output_suffix",
+        type=str,
+        default=".a3m",
+        help="批量模式下输出文件的后缀 (default: .a3m)",
+    )
+    parser.add_argument(
+        "--skip_existing",
+        action="store_true",
+        help="批量模式下跳过已存在的输出文件",
     )
     parser.add_argument(
         "--online",
@@ -256,9 +272,147 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
+def process_single_file(
+    input_fas: str,
+    output_a3m: str,
+    args,
+    seq_text: str = None,
+) -> bool:
+    """
+    处理单个文件，返回是否成功
+    """
+    try:
+        if args.online:
+            if seq_text is None:
+                seq_text = read_sequence_from_fasta(input_fas)
+            build_msa_online(
+                sequence=seq_text,
+                output_a3m=output_a3m,
+                email=args.email,
+                hit_limit=250,
+                expect=args.online_expect,
+                megablast=args.online_megablast,
+                word_size=args.online_word_size,
+                filter_low_complexity=args.online_filter_low_complexity,
+            )
+        else:
+            # Local BLAST path
+            if input_fas is None:
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    input_fas = write_temp_fasta(seq_text, tmpdir)
+                    build_msa(
+                        input_fas=input_fas,
+                        output_a3m=output_a3m,
+                        database_dpath=args.database_dpath,
+                        binary_dpath=args.binary_dpath,
+                        n_cpu=args.n_cpu,
+                    )
+                    return True
+
+            build_msa(
+                input_fas=input_fas,
+                output_a3m=output_a3m,
+                database_dpath=args.database_dpath,
+                binary_dpath=args.binary_dpath,
+                n_cpu=args.n_cpu,
+            )
+        return True
+    except Exception as e:
+        print(f"✗ 处理失败 {os.path.basename(input_fas)}: {e}", file=sys.stderr)
+        return False
+
+
+def batch_process(args):
+    """
+    批量处理文件夹中的所有FASTA文件
+    """
+    input_dir = Path(args.input_dir)
+    output_dir = Path(args.output_a3m)
+    
+    if not input_dir.exists():
+        print(f"错误: 输入目录不存在: {input_dir}", file=sys.stderr)
+        return 1
+    
+    # 创建输出目录
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 查找所有FASTA文件
+    fasta_extensions = ["*.fasta", "*.fa", "*.fna"]
+    fasta_files = []
+    for ext in fasta_extensions:
+        fasta_files.extend(input_dir.glob(ext))
+    
+    if not fasta_files:
+        print(f"警告: 在 {input_dir} 中未找到FASTA文件 (.fasta/.fa/.fna)", file=sys.stderr)
+        return 1
+    
+    print("=" * 80)
+    print(f"批量MSA构建")
+    print("=" * 80)
+    print(f"输入目录: {input_dir}")
+    print(f"输出目录: {output_dir}")
+    print(f"找到 {len(fasta_files)} 个FASTA文件")
+    print(f"模式: {'在线BLAST' if args.online else '本地BLAST'}")
+    if args.skip_existing:
+        print("跳过已存在的文件: 是")
+    print("=" * 80)
+    print()
+    
+    # 处理每个文件
+    success_count = 0
+    skip_count = 0
+    fail_count = 0
+    
+    for i, fasta_file in enumerate(fasta_files, 1):
+        # 生成输出文件名
+        base_name = fasta_file.stem  # 不带扩展名的文件名
+        output_file = output_dir / f"{base_name}{args.output_suffix}"
+        
+        # 检查是否跳过
+        if args.skip_existing and output_file.exists():
+            print(f"[{i}/{len(fasta_files)}] ⊘ 跳过 {fasta_file.name} (已存在)")
+            skip_count += 1
+            continue
+        
+        print(f"[{i}/{len(fasta_files)}] 处理中: {fasta_file.name} ...", end=" ", flush=True)
+        
+        # 处理文件
+        success = process_single_file(
+            input_fas=str(fasta_file),
+            output_a3m=str(output_file),
+            args=args,
+        )
+        
+        if success:
+            print(f"✓ 完成 -> {output_file.name}")
+            success_count += 1
+        else:
+            fail_count += 1
+    
+    # 汇总统计
+    print()
+    print("=" * 80)
+    print(f"批量处理完成")
+    print("=" * 80)
+    print(f"总计: {len(fasta_files)} 个文件")
+    print(f"成功: {success_count} 个")
+    if skip_count > 0:
+        print(f"跳过: {skip_count} 个")
+    if fail_count > 0:
+        print(f"失败: {fail_count} 个")
+    print("=" * 80)
+    
+    return 0 if fail_count == 0 else 1
+
+
 def main(argv=None):
     args = parse_args(argv)
 
+    # 批量处理模式
+    if args.input_dir:
+        return batch_process(args)
+    
+    # 单文件处理模式
     # Determine sequence and/or local FASTA
     if args.input_fasta:
         input_fas = args.input_fasta
@@ -267,39 +421,14 @@ def main(argv=None):
         seq_text = args.sequence
         input_fas = None
 
-    if args.online:
-        build_msa_online(
-            sequence=seq_text,
-            output_a3m=args.output_a3m,
-            email=args.email,
-            hit_limit=250,
-            expect=args.online_expect,
-            megablast=args.online_megablast,
-            word_size=args.online_word_size,
-            filter_low_complexity=args.online_filter_low_complexity,
-        )
-    else:
-        # Local BLAST path
-        if input_fas is None:
-            with tempfile.TemporaryDirectory() as tmpdir:
-                input_fas = write_temp_fasta(seq_text, tmpdir)
-                build_msa(
-                    input_fas=input_fas,
-                    output_a3m=args.output_a3m,
-                    database_dpath=args.database_dpath,
-                    binary_dpath=args.binary_dpath,
-                    n_cpu=args.n_cpu,
-                )
-                return 0
-
-        build_msa(
-            input_fas=input_fas,
-            output_a3m=args.output_a3m,
-            database_dpath=args.database_dpath,
-            binary_dpath=args.binary_dpath,
-            n_cpu=args.n_cpu,
-        )
-    return 0
+    success = process_single_file(
+        input_fas=input_fas,
+        output_a3m=args.output_a3m,
+        args=args,
+        seq_text=seq_text,
+    )
+    
+    return 0 if success else 1
 
 
 if __name__ == "__main__":

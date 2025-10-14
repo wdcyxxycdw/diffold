@@ -75,9 +75,11 @@ class CDHitCVSplitter:
         logger.info("收集所有序列...")
         
         all_sequences_file = self.output_dir / "all_sequences.fasta"
+        collected_ids = set()  # 检测重复ID
         
         with open(all_sequences_file, 'w') as f:
             seq_count = 0
+            duplicate_count = 0
             for fasta_file in self.sequences_dir.glob("*.fasta"):
                 try:
                     with open(fasta_file, 'r') as seq_file:
@@ -85,16 +87,31 @@ class CDHitCVSplitter:
                         if content:
                             # 提取序列ID（文件名去掉.fasta）
                             seq_id = fasta_file.stem
+                            
+                            # 检查重复ID
+                            if seq_id in collected_ids:
+                                logger.warning(f"发现重复序列ID: {seq_id}")
+                                duplicate_count += 1
+                                continue
+                            
+                            collected_ids.add(seq_id)
+                            
                             # 提取序列内容（第二行）
                             lines = content.split('\n')
                             if len(lines) >= 2:
                                 sequence = lines[1]
                                 f.write(f">{seq_id}\n{sequence}\n")
                                 seq_count += 1
+                            else:
+                                logger.warning(f"文件 {fasta_file} 格式不正确，跳过")
                 except Exception as e:
                     logger.warning(f"跳过文件 {fasta_file}: {e}")
         
-        logger.info(f"✓ 收集了 {seq_count} 个序列到 {all_sequences_file}")
+        logger.info(f"✓ 收集序列完成:")
+        logger.info(f"  有效序列: {seq_count} 个")
+        logger.info(f"  重复序列: {duplicate_count} 个")
+        logger.info(f"  输出文件: {all_sequences_file}")
+        
         return str(all_sequences_file)
     
     def run_cdhit(self, input_fasta: str) -> str:
@@ -156,6 +173,7 @@ class CDHitCVSplitter:
         
         clusters = {}
         current_cluster = None
+        all_sequence_ids = set()  # 用于检测重复
         
         with open(cluster_file, 'r') as f:
             for line in f:
@@ -165,23 +183,46 @@ class CDHitCVSplitter:
                     clusters[current_cluster] = []
                 elif line and current_cluster:
                     # 解析序列信息
-                    # 格式: 0	123aa, >seq_id... *
+                    # CD-HIT .clstr文件格式: 
+                    # 0	123nt, >seq_id... *
+                    # 1	456nt, >seq_id... at +/90.12%
                     parts = line.split('\t')
                     if len(parts) >= 2:
                         seq_info = parts[1]
                         if '>' in seq_info:
-                            seq_id = seq_info.split('>')[1].split('...')[0]
-                            clusters[current_cluster].append(seq_id)
+                            # 更精确的序列ID提取
+                            # 处理格式: "123nt, >seq_id... *" 或 "123nt, >seq_id... at +/90.12%"
+                            seq_part = seq_info.split('>')[1]
+                            if '...' in seq_part:
+                                seq_id = seq_part.split('...')[0]
+                            else:
+                                # 处理没有...的情况
+                                seq_id = seq_part.split()[0]
+                            
+                            # 检查重复
+                            if seq_id in all_sequence_ids:
+                                logger.warning(f"发现重复序列ID: {seq_id}")
+                            else:
+                                all_sequence_ids.add(seq_id)
+                                clusters[current_cluster].append(seq_id)
         
         # 统计聚类信息
         cluster_count = len(clusters)
         total_sequences = sum(len(seqs) for seqs in clusters.values())
         avg_cluster_size = total_sequences / cluster_count if cluster_count > 0 else 0
         
+        # 验证数据完整性
+        unique_sequences_count = len(all_sequence_ids)
+        
         logger.info(f"✓ 解析完成:")
         logger.info(f"  聚类数量: {cluster_count}")
         logger.info(f"  总序列数: {total_sequences}")
+        logger.info(f"  唯一序列数: {unique_sequences_count}")
         logger.info(f"  平均聚类大小: {avg_cluster_size:.2f}")
+        
+        if total_sequences != unique_sequences_count:
+            logger.error(f"❌ 数据完整性检查失败: 总序列数({total_sequences}) != 唯一序列数({unique_sequences_count})")
+            raise ValueError("聚类文件解析出现重复序列")
         
         return clusters
     
@@ -240,6 +281,10 @@ class CDHitCVSplitter:
         list_dir = self.output_dir / "list"
         list_dir.mkdir(exist_ok=True)
         
+        # 验证数据完整性
+        total_original_sequences = sum(len(seqs) for seqs in clusters.values())
+        all_used_sequences = set()
+        
         for fold, (train_clusters, val_clusters) in enumerate(splits):
             # 获取训练集和验证集的序列ID
             train_sequences = []
@@ -250,6 +295,19 @@ class CDHitCVSplitter:
             
             for cluster_id in val_clusters:
                 val_sequences.extend(clusters[cluster_id])
+            
+            # 检查是否有重复序列
+            train_set = set(train_sequences)
+            val_set = set(val_sequences)
+            overlap = train_set & val_set
+            
+            if overlap:
+                logger.error(f"❌ 折 {fold} 中训练集和验证集有重叠序列: {overlap}")
+                raise ValueError(f"折 {fold} 数据划分有重叠")
+            
+            # 记录所有使用的序列
+            all_used_sequences.update(train_sequences)
+            all_used_sequences.update(val_sequences)
             
             # 保存训练集（格式：fold-{fold}_train_ids）
             train_file = list_dir / f"fold-{fold}_train_ids"
@@ -264,6 +322,34 @@ class CDHitCVSplitter:
                     f.write(f"{seq_id}\n")
             
             logger.info(f"  折 {fold}: 训练集 {len(train_sequences)} 序列, 验证集 {len(val_sequences)} 序列")
+            logger.info(f"    训练集/验证集总数: {len(train_sequences) + len(val_sequences)}")
+        
+        # 最终数据完整性检查
+        logger.info(f"\n📊 数据完整性验证:")
+        logger.info(f"  原始总序列数: {total_original_sequences}")
+        logger.info(f"  划分后总序列数: {len(all_used_sequences)}")
+        
+        if len(all_used_sequences) != total_original_sequences:
+            logger.error(f"❌ 数据完整性检查失败!")
+            logger.error(f"  原始序列数: {total_original_sequences}")
+            logger.error(f"  划分后序列数: {len(all_used_sequences)}")
+            
+            # 找出缺失的序列
+            all_original_sequences = set()
+            for seqs in clusters.values():
+                all_original_sequences.update(seqs)
+            
+            missing = all_original_sequences - all_used_sequences
+            extra = all_used_sequences - all_original_sequences
+            
+            if missing:
+                logger.error(f"  缺失序列: {missing}")
+            if extra:
+                logger.error(f"  多余序列: {extra}")
+                
+            raise ValueError("交叉验证划分数据完整性检查失败")
+        else:
+            logger.info("✓ 数据完整性检查通过")
         
         # 保存总体统计信息
         stats_file = self.output_dir / "cv_stats.txt"
@@ -272,14 +358,16 @@ class CDHitCVSplitter:
             f.write(f"相似度阈值: {self.cdhit_threshold}\n")
             f.write(f"总聚类数: {len(clusters)}\n")
             f.write(f"总序列数: {sum(len(seqs) for seqs in clusters.values())}\n")
-            f.write(f"折数: {len(splits)}\n\n")
+            f.write(f"折数: {len(splits)}\n")
+            f.write(f"数据完整性: 通过\n\n")
             
             for fold, (train_clusters, val_clusters) in enumerate(splits):
                 train_sequences = sum(len(clusters[c]) for c in train_clusters)
                 val_sequences = sum(len(clusters[c]) for c in val_clusters)
                 f.write(f"折 {fold}:\n")
                 f.write(f"  训练集: {len(train_clusters)} 聚类, {train_sequences} 序列\n")
-                f.write(f"  验证集: {len(val_clusters)} 聚类, {val_sequences} 序列\n\n")
+                f.write(f"  验证集: {len(val_clusters)} 聚类, {val_sequences} 序列\n")
+                f.write(f"  总计: {train_sequences + val_sequences} 序列\n\n")
         
         logger.info(f"✓ 划分结果已保存到 {list_dir}")
         logger.info(f"✓ 统计信息已保存到 {stats_file}")
