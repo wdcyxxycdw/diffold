@@ -31,6 +31,462 @@ from diffold.training_monitor import TrainingMonitor
 from diffold.advanced_optimizers import AdaptiveOptimizer, DataLoaderOptimizer
 from diffold.metrics import RNAEvaluationMetrics
 
+# 微调策略类
+class FinetuneStrategy:
+    """微调策略管理类"""
+    
+    def __init__(self, config: 'TrainingConfig', model: nn.Module):
+        self.config = config
+        self.model = model
+        self.finetune_config = config.finetune
+        self.frozen_params = set()
+        self.layer_groups = {}
+        self.gradual_unfreeze_schedule = []
+        
+        # 分析模型结构
+        self._analyze_model_structure()
+        
+        # 如果启用微调，应用初始冻结策略
+        if self.finetune_config['enable_finetuning']:
+            self._apply_freeze_strategy()
+            self._apply_fine_grain_control()
+            self._setup_gradual_unfreeze()
+    
+    def _analyze_model_structure(self):
+        """分析模型结构，识别不同的层组"""
+        logger.info("🔍 分析Diffold模型结构用于微调...")
+        
+        # 获取所有命名参数
+        named_params = list(self.model.named_parameters())
+        total_params = len(named_params)
+        
+        # 基于Diffold实际架构的层级分组
+        self.layer_groups = {
+            'rhofold_backbone': [],      # RhoFold骨干网络（MSA嵌入、E2Eformer等）
+            'rhofold_structure': [],     # RhoFold结构模块
+            'rhofold_heads': [],         # RhoFold输出头（pLDDT、距离等）
+            'diffusion_module': [],      # 扩散模块
+            'confidence_head': [],       # 置信度预测头
+            'distogram_head': [],        # Distogram预测头
+            'adapters': [],              # 维度适配层
+            'other': []                  # 其他层
+        }
+        
+        # 🎯 细粒度层分组（仅E2Eformer块控制）
+        self.fine_grain_groups = {
+            'e2eformer_blocks': [],      # E2Eformer块列表
+        }
+        
+        for name, param in named_params:
+            # 基于实际模型架构的智能分类
+            if name.startswith('rhofold.'):
+                # RhoFold子模块分类
+                if any(keyword in name for keyword in ['msa_embedder', 'e2eformer', 'recycle_embnet']):
+                    self.layer_groups['rhofold_backbone'].append((name, param))
+                elif 'structure_module' in name:
+                    self.layer_groups['rhofold_structure'].append((name, param))
+                elif any(keyword in name for keyword in ['dist_head', 'ss_head', 'plddt_head']):
+                    self.layer_groups['rhofold_heads'].append((name, param))
+                else:
+                    self.layer_groups['rhofold_backbone'].append((name, param))
+                
+                # 🎯 细粒度分类（仅E2Eformer块）
+                if 'e2eformer.blocks' in name:
+                    # 提取块索引：rhofold.e2eformer.blocks.0.xxx
+                    try:
+                        block_idx = int(name.split('.')[3])  # 获取块索引
+                        if len(self.fine_grain_groups['e2eformer_blocks']) <= block_idx:
+                            self.fine_grain_groups['e2eformer_blocks'].extend([[] for _ in range(block_idx - len(self.fine_grain_groups['e2eformer_blocks']) + 1)])
+                        self.fine_grain_groups['e2eformer_blocks'][block_idx].append((name, param))
+                    except (IndexError, ValueError):
+                        pass
+                    
+            elif name.startswith('diffusion.'):
+                self.layer_groups['diffusion_module'].append((name, param))
+            elif name.startswith('confidence_head.'):
+                self.layer_groups['confidence_head'].append((name, param))
+            elif name.startswith('distogram_head.'):
+                self.layer_groups['distogram_head'].append((name, param))
+            elif any(keyword in name for keyword in ['single_dim_adapter', 'adapter']):
+                self.layer_groups['adapters'].append((name, param))
+            else:
+                self.layer_groups['other'].append((name, param))
+        
+        # 打印详细分组信息
+        logger.info("📊 Diffold模型层级分组:")
+        total_param_count = 0
+        for group_name, params in self.layer_groups.items():
+            if params:
+                param_count = sum(p.numel() for _, p in params)
+                total_param_count += param_count
+                logger.info(f"  {group_name}: {len(params)}层, {param_count:,}参数 ({param_count/total_param_count*100:.1f}%)")
+        
+        logger.info(f"  总计: {total_params}层, {total_param_count:,}参数")
+        
+        # 🎯 打印细粒度分组信息（仅E2Eformer块）
+        logger.info("🔍 E2Eformer块分组:")
+        if self.fine_grain_groups['e2eformer_blocks']:
+            blocks = self.fine_grain_groups['e2eformer_blocks']
+            total_blocks = len(blocks)
+            total_params_in_group = sum(sum(p.numel() for _, p in block) for block in blocks if block)
+            logger.info(f"  e2eformer_blocks: {total_blocks}个块, {total_params_in_group:,}参数")
+            for i, block in enumerate(blocks):
+                if block:
+                    block_params = sum(p.numel() for _, p in block)
+                    logger.info(f"    块{i}: {len(block)}层, {block_params:,}参数")
+        
+        # 保存层组信息用于后续冻结策略
+        self._layer_group_info = {
+            group_name: [name for name, _ in params] 
+            for group_name, params in self.layer_groups.items() 
+            if params
+        }
+        
+        # 保存细粒度分组信息
+        self._fine_grain_info = {}
+        for group_name, blocks in self.fine_grain_groups.items():
+            if blocks:
+                if isinstance(blocks, list) and len(blocks) > 0 and isinstance(blocks[0], list):
+                    # 块列表格式
+                    self._fine_grain_info[group_name] = [
+                        [name for name, _ in block] for block in blocks if block
+                    ]
+                else:
+                    # 普通层列表格式
+                    self._fine_grain_info[group_name] = [name for name, _ in blocks]
+    
+    def _apply_freeze_strategy(self):
+        """应用冻结策略"""
+        strategy = self.finetune_config['freeze_strategy']
+        logger.info(f"🧊 应用冻结策略: {strategy}")
+        
+        if strategy == 'none':
+            # 不冻结任何参数
+            logger.info("✅ 不冻结任何参数，全参数微调")
+            return
+        
+        elif strategy == 'rhofold_only':
+            # 只训练扩散模块，冻结RhoFold
+            self._freeze_layer_group('rhofold_backbone')
+            self._freeze_layer_group('rhofold_structure')
+            self._freeze_layer_group('rhofold_heads')
+            logger.info("🔒 已冻结RhoFold所有模块，只训练扩散部分")
+        
+        elif strategy == 'rhofold_backbone':
+            # 冻结RhoFold骨干网络，训练结构模块和扩散模块
+            self._freeze_layer_group('rhofold_backbone')
+            logger.info("🔒 已冻结RhoFold骨干网络，训练结构模块和扩散模块")
+        
+        elif strategy == 'rhofold_heads':
+            # 冻结RhoFold输出头，训练其他部分
+            self._freeze_layer_group('rhofold_heads')
+            logger.info("🔒 已冻结RhoFold输出头，训练其他模块")
+        
+        elif strategy == 'diffusion_only':
+            # 只训练扩散模块和置信度头
+            self._freeze_layer_group('rhofold_backbone')
+            self._freeze_layer_group('rhofold_structure')
+            self._freeze_layer_group('rhofold_heads')
+            self._freeze_layer_group('adapters')
+            logger.info("🔒 已冻结RhoFold和适配器，只训练扩散模块")
+        
+        elif strategy == 'confidence_only':
+            # 只训练置信度相关模块
+            self._freeze_layer_group('rhofold_backbone')
+            self._freeze_layer_group('rhofold_structure')
+            self._freeze_layer_group('rhofold_heads')
+            self._freeze_layer_group('diffusion_module')
+            self._freeze_layer_group('distogram_head')
+            logger.info("🔒 已冻结其他模块，只训练置信度头")
+        
+        elif strategy == 'custom':
+            # 自定义冻结
+            freeze_layers = self.finetune_config['freeze_layers']
+            self._freeze_custom_layers(freeze_layers)
+            logger.info(f"🔒 已冻结自定义层: {len(freeze_layers)}层")
+        
+        # 统计冻结参数
+        frozen_count = len(self.frozen_params)
+        total_count = sum(1 for _ in self.model.parameters())
+        trainable_count = total_count - frozen_count
+        
+        logger.info(f"📊 参数统计: 总计{total_count}, 冻结{frozen_count}, 可训练{trainable_count}")
+        
+        # 显示各模块的冻结状态
+        logger.info("🔍 各模块冻结状态:")
+        for group_name, params in self.layer_groups.items():
+            if params:
+                frozen_in_group = sum(1 for name, _ in params if name in self.frozen_params)
+                total_in_group = len(params)
+                status = "🔒冻结" if frozen_in_group == total_in_group else f"🔓部分({frozen_in_group}/{total_in_group})"
+                logger.info(f"  {group_name}: {status}")
+    
+    def _apply_fine_grain_control(self):
+        """应用细粒度层控制（仅E2Eformer块）"""
+        if not self.finetune_config['layer_control']['enable_layer_control']:
+            return
+        
+        logger.info("🎯 应用E2Eformer块细粒度控制...")
+        layer_control = self.finetune_config['layer_control']
+        
+        # E2Eformer块控制
+        if 'e2eformer' in layer_control and self.fine_grain_groups['e2eformer_blocks']:
+            e2eformer_config = layer_control['e2eformer']
+            freeze_blocks = e2eformer_config.get('freeze_blocks', [])
+            trainable_blocks = e2eformer_config.get('trainable_blocks', [])
+            
+            if freeze_blocks:
+                logger.info(f"🔒 冻结E2Eformer块: {freeze_blocks}")
+                for block_idx in freeze_blocks:
+                    if block_idx < len(self.fine_grain_groups['e2eformer_blocks']):
+                        self._freeze_block_group('e2eformer_blocks', block_idx)
+            
+            if trainable_blocks:
+                logger.info(f"🔓 指定可训练E2Eformer块: {trainable_blocks}")
+                # 先冻结所有块，再解冻指定的块
+                for block_idx in range(len(self.fine_grain_groups['e2eformer_blocks'])):
+                    if block_idx not in trainable_blocks:
+                        self._freeze_block_group('e2eformer_blocks', block_idx)
+    
+    def _freeze_block_group(self, group_name: str, block_idx: int):
+        """冻结指定块组中的特定块"""
+        if group_name in self.fine_grain_groups:
+            blocks = self.fine_grain_groups[group_name]
+            if isinstance(blocks, list) and block_idx < len(blocks) and blocks[block_idx]:
+                for name, param in blocks[block_idx]:
+                    param.requires_grad = False
+                    self.frozen_params.add(name)
+    
+    def _freeze_layer_group(self, group_name: str):
+        """冻结指定层组"""
+        if group_name in self.layer_groups:
+            for name, param in self.layer_groups[group_name]:
+                param.requires_grad = False
+                self.frozen_params.add(name)
+    
+    def _freeze_custom_layers(self, layer_names: list):
+        """冻结自定义层"""
+        for name, param in self.model.named_parameters():
+            if any(layer_name in name for layer_name in layer_names):
+                param.requires_grad = False
+                self.frozen_params.add(name)
+    
+    def _setup_gradual_unfreeze(self):
+        """设置渐进式解冻计划"""
+        if not self.finetune_config['gradual_unfreeze']['enable']:
+            return
+        
+        unfreeze_every = self.finetune_config['gradual_unfreeze']['unfreeze_every']
+        unfreeze_order = self.finetune_config['gradual_unfreeze']['unfreeze_order']
+        
+        # 创建解冻计划
+        frozen_layers = list(self.frozen_params)
+        
+        if unfreeze_order == 'top_down':
+            # 从输出层向输入层解冻
+            frozen_layers.reverse()
+        # bottom_up 保持原顺序
+        
+        # 按epoch分组
+        for i, layer_name in enumerate(frozen_layers):
+            unfreeze_epoch = (i // unfreeze_every + 1) * unfreeze_every
+            self.gradual_unfreeze_schedule.append((unfreeze_epoch, layer_name))
+        
+        logger.info(f"📅 渐进式解冻计划: {len(self.gradual_unfreeze_schedule)}步骤")
+    
+    def update_for_epoch(self, epoch: int):
+        """根据epoch更新冻结状态"""
+        # 检查是否需要全部解冻
+        unfreeze_after = self.finetune_config['unfreeze_after_epochs']
+        if unfreeze_after > 0 and epoch >= unfreeze_after:
+            self._unfreeze_all()
+            return
+        
+        # 检查渐进式解冻
+        if self.gradual_unfreeze_schedule:
+            for unfreeze_epoch, layer_name in self.gradual_unfreeze_schedule:
+                if epoch == unfreeze_epoch:
+                    self._unfreeze_layer(layer_name)
+    
+    def _unfreeze_all(self):
+        """解冻所有参数"""
+        unfrozen_count = 0
+        for name, param in self.model.named_parameters():
+            if name in self.frozen_params:
+                param.requires_grad = True
+                unfrozen_count += 1
+        
+        self.frozen_params.clear()
+        logger.info(f"🔓 已解冻所有参数: {unfrozen_count}层")
+    
+    def _unfreeze_layer(self, layer_name: str):
+        """解冻指定层"""
+        for name, param in self.model.named_parameters():
+            if name == layer_name:
+                param.requires_grad = True
+                self.frozen_params.discard(name)
+                logger.info(f"🔓 解冻层: {layer_name}")
+                break
+    
+    def get_parameter_groups(self, base_lr: float):
+        """获取分层学习率的参数组"""
+        if not self.finetune_config['learning_rate_scaling']['enable']:
+            # 不使用分层学习率，返回标准参数组
+            return [{'params': [p for p in self.model.parameters() if p.requires_grad]}]
+        
+        scaling_config = self.finetune_config['learning_rate_scaling']
+        param_groups = []
+        
+        # RhoFold骨干网络参数组（最低学习率）
+        rhofold_backbone_params = [p for name, p in self.layer_groups['rhofold_backbone'] if p.requires_grad]
+        if rhofold_backbone_params:
+            param_groups.append({
+                'params': rhofold_backbone_params,
+                'lr': base_lr * scaling_config['backbone_lr_ratio'],
+                'name': 'rhofold_backbone'
+            })
+        
+        # RhoFold结构模块参数组
+        rhofold_structure_params = [p for name, p in self.layer_groups['rhofold_structure'] if p.requires_grad]
+        if rhofold_structure_params:
+            param_groups.append({
+                'params': rhofold_structure_params,
+                'lr': base_lr * scaling_config['backbone_lr_ratio'] * scaling_config['layer_wise_decay'],
+                'name': 'rhofold_structure'
+            })
+        
+        # RhoFold输出头参数组
+        rhofold_heads_params = [p for name, p in self.layer_groups['rhofold_heads'] if p.requires_grad]
+        if rhofold_heads_params:
+            param_groups.append({
+                'params': rhofold_heads_params,
+                'lr': base_lr * scaling_config['backbone_lr_ratio'] * (scaling_config['layer_wise_decay'] ** 2),
+                'name': 'rhofold_heads'
+            })
+        
+        # 扩散模块参数组（核心训练目标）
+        diffusion_params = [p for name, p in self.layer_groups['diffusion_module'] if p.requires_grad]
+        if diffusion_params:
+            param_groups.append({
+                'params': diffusion_params,
+                'lr': base_lr,  # 使用完整学习率
+                'name': 'diffusion_module'
+            })
+        
+        # 置信度头参数组（高学习率）
+        confidence_params = [p for name, p in self.layer_groups['confidence_head'] if p.requires_grad]
+        if confidence_params:
+            param_groups.append({
+                'params': confidence_params,
+                'lr': base_lr * scaling_config['head_lr_ratio'],
+                'name': 'confidence_head'
+            })
+        
+        # Distogram头参数组
+        distogram_params = [p for name, p in self.layer_groups['distogram_head'] if p.requires_grad]
+        if distogram_params:
+            param_groups.append({
+                'params': distogram_params,
+                'lr': base_lr * scaling_config['head_lr_ratio'],
+                'name': 'distogram_head'
+            })
+        
+        # 适配器参数组
+        adapter_params = [p for name, p in self.layer_groups['adapters'] if p.requires_grad]
+        if adapter_params:
+            param_groups.append({
+                'params': adapter_params,
+                'lr': base_lr * 0.5,  # 中等学习率
+                'name': 'adapters'
+            })
+        
+        # 🎯 E2Eformer块细粒度学习率控制
+        if self.finetune_config['layer_control']['enable_layer_control']:
+            # E2Eformer块学习率
+            if 'e2eformer' in self.finetune_config['layer_control']:
+                e2eformer_config = self.finetune_config['layer_control']['e2eformer']
+                block_lr_ratios = e2eformer_config.get('block_lr_ratios', {})
+                
+                for block_idx, lr_ratio in block_lr_ratios.items():
+                    if (block_idx < len(self.fine_grain_groups['e2eformer_blocks']) and 
+                        self.fine_grain_groups['e2eformer_blocks'][block_idx]):
+                        block_params = [p for _, p in self.fine_grain_groups['e2eformer_blocks'][block_idx] if p.requires_grad]
+                        if block_params:
+                            param_groups.append({
+                                'params': block_params,
+                                'lr': base_lr * lr_ratio,
+                                'name': f'e2eformer_block_{block_idx}'
+                            })
+        
+        # 其他参数组
+        other_params = [p for name, p in self.layer_groups['other'] if p.requires_grad]
+        if other_params:
+            param_groups.append({
+                'params': other_params,
+                'lr': base_lr,
+                'name': 'other'
+            })
+        
+        # 如果没有任何参数组，返回默认组
+        if not param_groups:
+            param_groups = [{'params': [p for p in self.model.parameters() if p.requires_grad]}]
+        
+        logger.info(f"📊 创建{len(param_groups)}个参数组用于分层学习率")
+        for group in param_groups:
+            if 'name' in group:
+                param_count = sum(p.numel() for p in group['params'])
+                lr = group.get('lr', base_lr)
+                logger.info(f"  {group['name']}: {param_count:,}参数, LR={lr:.2e}")
+        
+        return param_groups
+    
+    def get_status_info(self):
+        """获取微调状态信息"""
+        total_params = sum(1 for _ in self.model.parameters())
+        frozen_params = len(self.frozen_params)
+        trainable_params = total_params - frozen_params
+        
+        return {
+            'total_params': total_params,
+            'frozen_params': frozen_params,
+            'trainable_params': trainable_params,
+            'freeze_strategy': self.finetune_config['freeze_strategy'],
+            'gradual_unfreeze_enabled': self.finetune_config['gradual_unfreeze']['enable'],
+            'remaining_unfreeze_steps': len([step for step in self.gradual_unfreeze_schedule if step[0] > 0])
+        }
+    
+    def print_model_architecture(self):
+        """打印详细的模型架构信息"""
+        logger.info("🏗️ Diffold模型架构详情:")
+        logger.info("=" * 60)
+        
+        for group_name, params in self.layer_groups.items():
+            if params:
+                param_count = sum(p.numel() for _, p in params)
+                frozen_count = sum(1 for name, _ in params if name in self.frozen_params)
+                trainable_count = len(params) - frozen_count
+                
+                logger.info(f"📦 {group_name}:")
+                logger.info(f"   总层数: {len(params)}")
+                logger.info(f"   参数数量: {param_count:,}")
+                logger.info(f"   冻结层: {frozen_count}")
+                logger.info(f"   可训练层: {trainable_count}")
+                
+                # 显示前几个层的名称作为示例
+                if len(params) <= 5:
+                    for name, _ in params[:3]:
+                        status = "🔒" if name in self.frozen_params else "🔓"
+                        logger.info(f"     {status} {name}")
+                else:
+                    for name, _ in params[:2]:
+                        status = "🔒" if name in self.frozen_params else "🔓"
+                        logger.info(f"     {status} {name}")
+                    logger.info(f"     ... 还有{len(params)-2}层")
+                logger.info("")
+        
+        logger.info("=" * 60)
+
+
 # 工具函数
 def format_time(seconds):
     """格式化时间显示"""
@@ -188,6 +644,43 @@ class TrainingConfig:
             }
         }
         
+        # 🔥 微调配置
+        self.finetune = {
+            'enable_finetuning': False,  # 是否启用微调模式
+            'pretrained_checkpoint': None,  # 预训练模型检查点路径
+            'freeze_strategy': 'none',  # 冻结策略: 'none', 'encoder', 'backbone', 'custom'
+            'freeze_layers': [],  # 自定义冻结的层名称列表
+            'unfreeze_after_epochs': 0,  # 在指定epoch后解冻所有参数
+            'gradual_unfreeze': {
+                'enable': False,  # 是否启用渐进式解冻
+                'unfreeze_every': 5,  # 每N个epoch解冻一层
+                'unfreeze_order': 'top_down'  # 解冻顺序: 'top_down', 'bottom_up'
+            },
+            'learning_rate_scaling': {
+                'enable': True,  # 是否对不同层使用不同学习率
+                'frozen_lr_ratio': 0.0,  # 冻结层的学习率比例
+                'backbone_lr_ratio': 0.1,  # 骨干网络学习率比例
+                'head_lr_ratio': 1.0,  # 头部网络学习率比例
+                'layer_wise_decay': 0.9  # 层级学习率衰减因子
+            },
+            'warmup_strategy': {
+                'enable': True,  # 是否启用微调专用预热
+                'warmup_epochs': 2,  # 预热轮数
+                'warmup_lr_ratio': 0.1  # 预热期间的学习率比例
+            },
+            # 🎯 细粒度层控制（仅E2Eformer块）
+            'layer_control': {
+                'enable_layer_control': False,  # 是否启用细粒度层控制
+                'e2eformer': {
+                    'freeze_blocks': [],  # 冻结的E2Eformer块索引 [0, 1, 2, ...]
+                    'trainable_blocks': [],  # 可训练的E2Eformer块索引，为空表示全部
+                    'block_lr_ratios': {},  # 各块的学习率比例 {0: 0.1, 1: 0.2, ...}
+                    'gradual_unfreeze_blocks': False,  # 是否渐进式解冻块
+                    'unfreeze_block_every': 2,  # 每N个epoch解冻一个块
+                }
+            }
+        }
+        
         # 如果提供了配置文件，则加载配置
         if config_file:
             self.load_from_yaml(config_file)
@@ -326,6 +819,16 @@ class TrainingConfig:
             enhanced_config = config_data['enhanced_features']
             self.enhanced_features.update(enhanced_config)
         
+        # 加载微调配置
+        if 'finetune' in config_data:
+            finetune_config = config_data['finetune']
+            self.finetune.update(finetune_config)
+            
+            # 递归更新嵌套字典
+            for key in ['gradual_unfreeze', 'learning_rate_scaling', 'warmup_strategy']:
+                if key in finetune_config and key in self.finetune:
+                    self.finetune[key].update(finetune_config[key])
+        
         logger.info("✅ 配置文件加载完成")
 
 
@@ -425,10 +928,30 @@ class DiffoldTrainer:
         if self.enhanced_enabled:
             self._setup_enhanced_features()
         
+        # 🔥 初始化微调功能
+        self.finetune_strategy = None
+        self.is_finetuning = config.finetune.get('enable_finetuning', False)
+        
+        if self.is_finetuning and self.is_main_process:
+            logger.info("🎯 启用微调模式")
+        
         # 初始化模型
         self.model = self.setup_model()
         # 移动到设备
         self.model = self.model.to(self.device)
+        
+        # 🔥 设置微调策略（在模型初始化后）
+        if self.is_finetuning:
+            self.finetune_strategy = FinetuneStrategy(self.config, self.model)
+            if self.is_main_process:
+                status_info = self.finetune_strategy.get_status_info()
+                logger.info(f"🎯 微调策略: {status_info['freeze_strategy']}")
+                logger.info(f"📊 参数状态: 总计{status_info['total_params']}, "
+                           f"冻结{status_info['frozen_params']}, "
+                           f"可训练{status_info['trainable_params']}")
+                
+                # 打印详细的模型架构信息
+                self.finetune_strategy.print_model_architecture()
         # ⚡ 可选 torch.compile
         if self.config.use_torch_compile:
             try:
@@ -526,9 +1049,70 @@ class DiffoldTrainer:
     def setup_model(self):
         """设置模型"""
         logger.info("初始化Diffold模型...")
-        model = Diffold(self.config, rhofold_checkpoint_path=self.config.rhofold_checkpoint)
+        
+        # 🔥 在微调模式下，不预先冻结RhoFold参数
+        if self.is_finetuning:
+            logger.info("🎯 微调模式：RhoFold参数将保持可训练状态")
+            # 临时设置配置，让Diffold不预先冻结RhoFold参数
+            original_freeze_rhofold = getattr(self.config, 'freeze_rhofold', True)
+            self.config.freeze_rhofold = False
+            model = Diffold(self.config, rhofold_checkpoint_path=self.config.rhofold_checkpoint)
+            # 恢复原始配置
+            self.config.freeze_rhofold = original_freeze_rhofold
+        else:
+            model = Diffold(self.config, rhofold_checkpoint_path=self.config.rhofold_checkpoint)
+        
+        # 🔥 加载预训练检查点用于微调
+        if self.is_finetuning and self.config.finetune.get('pretrained_checkpoint'):
+            self._load_pretrained_checkpoint(model)
+        
         logger.info("模型初始化完成")
         return model
+    
+    def _load_pretrained_checkpoint(self, model):
+        """加载预训练检查点用于微调"""
+        checkpoint_path = self.config.finetune['pretrained_checkpoint']
+        if not Path(checkpoint_path).exists():
+            logger.warning(f"⚠️ 预训练检查点不存在: {checkpoint_path}")
+            return
+        
+        logger.info(f"📥 加载预训练检查点: {checkpoint_path}")
+        
+        try:
+            checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+            
+            # 提取模型状态字典
+            if 'model_state_dict' in checkpoint:
+                state_dict = checkpoint['model_state_dict']
+            elif 'state_dict' in checkpoint:
+                state_dict = checkpoint['state_dict']
+            else:
+                state_dict = checkpoint
+            
+            # 处理DataParallel包装的状态字典
+            if any(key.startswith('module.') for key in state_dict.keys()):
+                state_dict = {key.replace('module.', ''): value for key, value in state_dict.items()}
+            
+            # 尝试加载状态字典
+            missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+            
+            if missing_keys:
+                logger.warning(f"⚠️ 缺失的键: {len(missing_keys)}个")
+                if len(missing_keys) <= 10:  # 只显示前10个
+                    for key in missing_keys[:10]:
+                        logger.debug(f"  缺失: {key}")
+            
+            if unexpected_keys:
+                logger.warning(f"⚠️ 意外的键: {len(unexpected_keys)}个")
+                if len(unexpected_keys) <= 10:  # 只显示前10个
+                    for key in unexpected_keys[:10]:
+                        logger.debug(f"  意外: {key}")
+            
+            logger.info("✅ 预训练检查点加载完成")
+            
+        except Exception as e:
+            logger.error(f"❌ 预训练检查点加载失败: {e}")
+            raise
     
     def setup_data_loaders(self):
         """设置数据加载器"""
@@ -576,6 +1160,13 @@ class DiffoldTrainer:
         """设置优化器和调度器"""
         logger.info("设置优化器和调度器...")
         
+        # 🔥 优先获取参数组（如果在微调模式）
+        param_groups = None
+        if self.is_finetuning and self.finetune_strategy:
+            param_groups = self.finetune_strategy.get_parameter_groups(self.config.learning_rate)
+            if self.is_main_process:
+                logger.info(f"🎯 微调模式：使用分层学习率，共{len(param_groups)}个参数组")
+        
         # 🔥 使用增强优化器
         if (self.enhanced_enabled and 
             self.config.enhanced_features['optimizer']['use_advanced_optimizer']):
@@ -591,21 +1182,40 @@ class DiffoldTrainer:
                 logger.info(f"  总训练步数: {total_steps}")
                 logger.info(f"  预热步数: {self.config.warmup_steps}")
             
-            self.enhanced_optimizer = AdaptiveOptimizer(  # type: ignore[arg-type]
-                model=cast(nn.Module, self.model),
-                optimizer_name=self.config.enhanced_features['optimizer']['optimizer_name'],
-                learning_rate=self.config.learning_rate,
-                weight_decay=self.config.weight_decay,
-                scheduler_config={
-                    'type': self.config.enhanced_features['optimizer']['scheduler_type'],
-                    'warmup_steps': self.config.warmup_steps,
-                    'T_max': total_steps,  # 使用真实总步数
-                    'eta_min': 1e-6
-                },
-                gradient_accumulation_steps=self.config.enhanced_features['optimizer']['gradient_accumulation_steps'],
-                max_grad_norm=self.config.grad_clip_norm,
-                scaler=self.scaler  # 传递scaler以支持混合精度训练
-            )
+            # 🔥 根据是否有参数组选择模式
+            if param_groups is not None:
+                # 微调模式：使用参数组
+                self.enhanced_optimizer = AdaptiveOptimizer(
+                    param_groups=param_groups,  # ✅ 传递参数组
+                    optimizer_name=self.config.enhanced_features['optimizer']['optimizer_name'],
+                    weight_decay=self.config.weight_decay,
+                    scheduler_config={
+                        'type': self.config.enhanced_features['optimizer']['scheduler_type'],
+                        'warmup_steps': self.config.warmup_steps,
+                        'T_max': total_steps,
+                        'eta_min': 1e-6
+                    },
+                    gradient_accumulation_steps=self.config.enhanced_features['optimizer']['gradient_accumulation_steps'],
+                    max_grad_norm=self.config.grad_clip_norm,
+                    scaler=self.scaler
+                )
+            else:
+                # 标准模式：传递模型
+                self.enhanced_optimizer = AdaptiveOptimizer(
+                    model=cast(nn.Module, self.model),
+                    optimizer_name=self.config.enhanced_features['optimizer']['optimizer_name'],
+                    learning_rate=self.config.learning_rate,
+                    weight_decay=self.config.weight_decay,
+                    scheduler_config={
+                        'type': self.config.enhanced_features['optimizer']['scheduler_type'],
+                        'warmup_steps': self.config.warmup_steps,
+                        'T_max': total_steps,
+                        'eta_min': 1e-6
+                    },
+                    gradient_accumulation_steps=self.config.enhanced_features['optimizer']['gradient_accumulation_steps'],
+                    max_grad_norm=self.config.grad_clip_norm,
+                    scaler=self.scaler
+                )
             
             # 包装原接口
             self.optimizer = self.enhanced_optimizer.optimizer
@@ -613,16 +1223,24 @@ class DiffoldTrainer:
             
         else:
             # 使用原版优化器
-            if hasattr(self.model, 'get_trainable_parameters'):
-                trainable_params = self.model.get_trainable_parameters()
+            # 🔥 支持微调的参数组
+            if param_groups is not None:
+                self.optimizer = torch.optim.AdamW(
+                    param_groups,
+                    weight_decay=self.config.weight_decay
+                )
             else:
-                trainable_params = self.model.parameters()
-            
-            self.optimizer = torch.optim.AdamW(
-                trainable_params,
-                lr=self.config.learning_rate,
-                weight_decay=self.config.weight_decay
-            )
+                # 标准参数设置
+                if hasattr(self.model, 'get_trainable_parameters'):
+                    trainable_params = self.model.get_trainable_parameters()
+                else:
+                    trainable_params = self.model.parameters()
+                
+                self.optimizer = torch.optim.AdamW(
+                    trainable_params,
+                    lr=self.config.learning_rate,
+                    weight_decay=self.config.weight_decay
+                )
             
             # 创建调度器
             if self.config.scheduler_type == "cosine":
@@ -1272,6 +1890,18 @@ class DiffoldTrainer:
             epoch_start_time = time.time()
             if self.config.test_mode and epoch >= self.config.test_epochs: break
             
+            # 🔥 更新微调状态
+            if self.is_finetuning and self.finetune_strategy:
+                self.finetune_strategy.update_for_epoch(epoch)
+                
+                # 记录微调状态变化
+                if epoch > 0 and self.is_main_process:
+                    status_info = self.finetune_strategy.get_status_info()
+                    if status_info['frozen_params'] != getattr(self, '_last_frozen_count', status_info['frozen_params']):
+                        logger.info(f"🔄 微调状态更新: 冻结{status_info['frozen_params']}参数, "
+                                   f"可训练{status_info['trainable_params']}参数")
+                        self._last_frozen_count = status_info['frozen_params']
+            
             # 训练一个epoch
             train_loss = self.train_one_epoch(epoch)
             
@@ -1360,6 +1990,18 @@ class DiffoldTrainer:
                     self.writer.add_scalar('Loss/Valid', valid_loss, epoch)
                 self.writer.add_scalar('LearningRate', current_lr, epoch)
                 self.writer.add_scalar('EpochTime', epoch_time, epoch)
+                
+                # 🔥 记录微调状态到TensorBoard
+                if self.is_finetuning and self.finetune_strategy:
+                    status_info = self.finetune_strategy.get_status_info()
+                    self.writer.add_scalar('Finetune/FrozenParams', status_info['frozen_params'], epoch)
+                    self.writer.add_scalar('Finetune/TrainableParams', status_info['trainable_params'], epoch)
+                    
+                    # 记录不同参数组的学习率
+                    if hasattr(self.optimizer, 'param_groups') and len(self.optimizer.param_groups) > 1:
+                        for i, group in enumerate(self.optimizer.param_groups):
+                            group_name = group.get('name', f'group_{i}')
+                            self.writer.add_scalar(f'LearningRate/{group_name}', group['lr'], epoch)
                 
                 # 🔥 记录RNA结构评估指标到TensorBoard
                 if val_metrics:
@@ -1636,10 +2278,47 @@ def main():
                        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
                        help="日志级别 (默认使用配置文件中的设置)")
     
+    # 🔥 微调参数
+    parser.add_argument("--finetune", action="store_true", help="启用微调模式")
+    parser.add_argument("--pretrained_checkpoint", type=str, default=None, 
+                       help="预训练模型检查点路径")
+    parser.add_argument("--freeze_strategy", type=str, default=None,
+                       choices=['none', 'rhofold_only', 'rhofold_backbone', 'rhofold_heads', 
+                               'diffusion_only', 'confidence_only', 'custom'],
+                       help="参数冻结策略")
+    parser.add_argument("--freeze_layers", type=str, nargs='+', default=None,
+                       help="自定义冻结的层名称（用于custom策略）")
+    parser.add_argument("--unfreeze_after_epochs", type=int, default=None,
+                       help="在指定epoch后解冻所有参数")
+    parser.add_argument("--gradual_unfreeze", action="store_true",
+                       help="启用渐进式解冻")
+    parser.add_argument("--unfreeze_every", type=int, default=5,
+                       help="渐进式解冻：每N个epoch解冻一层")
+    parser.add_argument("--unfreeze_order", type=str, default="top_down",
+                       choices=['top_down', 'bottom_up'],
+                       help="渐进式解冻顺序")
+    parser.add_argument("--disable_lr_scaling", action="store_true",
+                       help="禁用分层学习率")
+    parser.add_argument("--backbone_lr_ratio", type=float, default=0.1,
+                       help="骨干网络学习率比例")
+    parser.add_argument("--head_lr_ratio", type=float, default=1.0,
+                       help="输出头学习率比例")
+    
+    # 🎯 E2Eformer块细粒度控制参数
+    parser.add_argument("--enable_layer_control", action="store_true",
+                       help="启用E2Eformer块细粒度控制")
+    parser.add_argument("--freeze_e2eformer_blocks", type=int, nargs='+', default=None,
+                       help="冻结指定的E2Eformer块索引")
+    parser.add_argument("--trainable_e2eformer_blocks", type=int, nargs='+', default=None,
+                       help="指定可训练的E2Eformer块索引")
+    parser.add_argument("--e2eformer_block_lr_ratios", type=str, default=None,
+                       help="E2Eformer块学习率比例，格式：0:0.1,1:0.2,2:0.3")
+    
     # 其他参数
     parser.add_argument("--resume", type=str, default=None, help="从检查点恢复训练")
     parser.add_argument("--test", action="store_true", help="运行多GPU环境小规模测试")
     parser.add_argument("--fixed_sample_name", type=str, default=None, help="指定用于测试的固定样本名称")
+    parser.add_argument("--analyze_model", action="store_true", help="分析模型架构并退出")
 
     
     args = parser.parse_args()
@@ -1742,6 +2421,72 @@ def main():
     if args.test:
         run_small_scale_test(fixed_sample_name=args.fixed_sample_name)
         return
+    
+    # 如果是模型分析模式
+    if args.analyze_model:
+        analyze_model_architecture(config)
+        return
+    
+    # 🔥 应用微调设置
+    if args.finetune:
+        config.finetune['enable_finetuning'] = True
+        logger.info("🎯 启用微调模式")
+        
+        if args.pretrained_checkpoint:
+            config.finetune['pretrained_checkpoint'] = args.pretrained_checkpoint
+            logger.info(f"📥 预训练检查点: {args.pretrained_checkpoint}")
+        
+        if args.freeze_strategy:
+            config.finetune['freeze_strategy'] = args.freeze_strategy
+            logger.info(f"🧊 冻结策略: {args.freeze_strategy}")
+        
+        if args.freeze_layers:
+            config.finetune['freeze_layers'] = args.freeze_layers
+            logger.info(f"🔒 自定义冻结层: {len(args.freeze_layers)}层")
+        
+        if args.unfreeze_after_epochs is not None:
+            config.finetune['unfreeze_after_epochs'] = args.unfreeze_after_epochs
+            logger.info(f"🔓 将在第{args.unfreeze_after_epochs}轮后解冻所有参数")
+        
+        if args.gradual_unfreeze:
+            config.finetune['gradual_unfreeze']['enable'] = True
+            config.finetune['gradual_unfreeze']['unfreeze_every'] = args.unfreeze_every
+            config.finetune['gradual_unfreeze']['unfreeze_order'] = args.unfreeze_order
+            logger.info(f"📅 渐进式解冻: 每{args.unfreeze_every}轮, 顺序={args.unfreeze_order}")
+        
+        if args.disable_lr_scaling:
+            config.finetune['learning_rate_scaling']['enable'] = False
+            logger.info("⚪ 禁用分层学习率")
+        else:
+            config.finetune['learning_rate_scaling']['backbone_lr_ratio'] = args.backbone_lr_ratio
+            config.finetune['learning_rate_scaling']['head_lr_ratio'] = args.head_lr_ratio
+            logger.info(f"📊 学习率比例: 骨干={args.backbone_lr_ratio}, 头部={args.head_lr_ratio}")
+        
+        # 🎯 应用E2Eformer块细粒度控制设置
+        if args.enable_layer_control:
+            config.finetune['layer_control']['enable_layer_control'] = True
+            logger.info("🎯 启用E2Eformer块细粒度控制")
+            
+            # E2Eformer块控制
+            if args.freeze_e2eformer_blocks:
+                config.finetune['layer_control']['e2eformer']['freeze_blocks'] = args.freeze_e2eformer_blocks
+                logger.info(f"🔒 冻结E2Eformer块: {args.freeze_e2eformer_blocks}")
+            
+            if args.trainable_e2eformer_blocks:
+                config.finetune['layer_control']['e2eformer']['trainable_blocks'] = args.trainable_e2eformer_blocks
+                logger.info(f"🔓 可训练E2Eformer块: {args.trainable_e2eformer_blocks}")
+            
+            # E2Eformer块学习率比例设置
+            if args.e2eformer_block_lr_ratios:
+                try:
+                    ratios = {}
+                    for ratio_str in args.e2eformer_block_lr_ratios.split(','):
+                        block_idx, lr_ratio = ratio_str.split(':')
+                        ratios[int(block_idx)] = float(lr_ratio)
+                    config.finetune['layer_control']['e2eformer']['block_lr_ratios'] = ratios
+                    logger.info(f"📊 E2Eformer块学习率比例: {ratios}")
+                except Exception as e:
+                    logger.warning(f"⚠️ E2Eformer块学习率比例解析失败: {e}")
     
     # 🔥 应用增强功能设置
     if args.disable_enhanced:
@@ -1852,6 +2597,20 @@ def main():
     else:
         logger.info("⚪ 增强功能: 已禁用（使用原版功能）")
     
+    # 🔥 显示微调功能状态
+    if config.finetune.get('enable_finetuning', False):
+        logger.info("🎯 微调功能: 已启用")
+        logger.info(f"   • 冻结策略: {config.finetune['freeze_strategy']}")
+        if config.finetune.get('pretrained_checkpoint'):
+            logger.info(f"   • 预训练模型: {config.finetune['pretrained_checkpoint']}")
+        if config.finetune['gradual_unfreeze']['enable']:
+            logger.info(f"   • 渐进式解冻: 每{config.finetune['gradual_unfreeze']['unfreeze_every']}轮")
+        if config.finetune['learning_rate_scaling']['enable']:
+            logger.info(f"   • 分层学习率: 骨干={config.finetune['learning_rate_scaling']['backbone_lr_ratio']}, "
+                       f"头部={config.finetune['learning_rate_scaling']['head_lr_ratio']}")
+    else:
+        logger.info("⚪ 微调功能: 已禁用（标准训练模式）")
+    
     logger.info("="*50)
     
     # 创建训练器
@@ -1864,6 +2623,65 @@ def main():
         # 确保所有进程都完成后再销毁进程组
         dist.barrier()
         dist.destroy_process_group()
+
+
+def analyze_model_architecture(config):
+    """分析模型架构"""
+    logger.info("🔍 开始分析Diffold模型架构...")
+    
+    try:
+        # 创建训练器实例（只初始化模型部分）
+        trainer = DiffoldTrainer(config)
+        
+        # 如果启用了微调，显示微调策略信息
+        if config.finetune.get('enable_finetuning', False):
+            logger.info("🎯 微调模式已启用")
+            if trainer.finetune_strategy:
+                trainer.finetune_strategy.print_model_architecture()
+        else:
+            logger.info("⚪ 标准训练模式")
+            # 创建临时的微调策略来分析架构
+            temp_strategy = FinetuneStrategy(config, trainer.model)
+            temp_strategy.print_model_architecture()
+        
+        logger.info("✅ 模型架构分析完成")
+        
+        # 🔍 验证参数冻结状态
+        verify_parameter_freeze_status(trainer.model, trainer.finetune_strategy)
+        
+    except Exception as e:
+        logger.error(f"❌ 模型架构分析失败: {e}")
+        import traceback
+        traceback.print_exc()
+
+def verify_parameter_freeze_status(model, finetune_strategy):
+    """验证参数冻结状态是否正确"""
+    logger.info("🔍 验证参数冻结状态...")
+    
+    # 统计RhoFold参数状态
+    rhofold_trainable = 0
+    rhofold_frozen = 0
+    
+    for name, param in model.named_parameters():
+        if name.startswith('rhofold.'):
+            if param.requires_grad:
+                rhofold_trainable += 1
+            else:
+                rhofold_frozen += 1
+    
+    logger.info(f"📊 RhoFold参数状态:")
+    logger.info(f"  可训练: {rhofold_trainable}个参数")
+    logger.info(f"  已冻结: {rhofold_frozen}个参数")
+    
+    if finetune_strategy and finetune_strategy.finetune_config['enable_finetuning']:
+        # 检查微调策略是否正确应用
+        strategy = finetune_strategy.finetune_config['freeze_strategy']
+        if strategy == 'none' and rhofold_frozen > 0:
+            logger.warning(f"⚠️ 警告: 微调策略为'none'但仍有{rhofold_frozen}个RhoFold参数被冻结")
+        elif strategy in ['rhofold_only', 'rhofold_backbone'] and rhofold_trainable > 0:
+            logger.warning(f"⚠️ 警告: 微调策略为'{strategy}'但仍有{rhofold_trainable}个RhoFold参数可训练")
+    
+    logger.info("✅ 参数冻结状态验证完成")
 
 
 def run_small_scale_test(fixed_sample_name=None):

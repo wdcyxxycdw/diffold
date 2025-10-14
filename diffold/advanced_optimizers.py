@@ -143,10 +143,11 @@ class CosineAnnealingWarmRestarts(_LRScheduler):
 
 
 class AdaptiveOptimizer:
-    """自适应优化器包装器"""
+    """自适应优化器包装器 - 支持标准训练和微调（参数组）"""
 
     def __init__(self, 
-                 model: nn.Module,
+                 model: Optional[nn.Module] = None,
+                 param_groups: Optional[List[Dict]] = None,
                  optimizer_name: str = "adamw",
                  learning_rate: float = 1e-4,
                  weight_decay: float = 1e-5,
@@ -158,31 +159,53 @@ class AdaptiveOptimizer:
         初始化自适应优化器
         
         Args:
-            model: 模型
+            model: 模型（与param_groups二选一）
+            param_groups: 参数组列表，用于微调时的分层学习率（与model二选一）
             optimizer_name: 优化器名称
-            learning_rate: 学习率
+            learning_rate: 学习率（仅在使用model时生效）
             weight_decay: 权重衰减
             scheduler_config: 调度器配置
             gradient_accumulation_steps: 梯度累积步数
             max_grad_norm: 最大梯度范数（梯度裁剪）
             scaler: 混合精度训练的GradScaler
+        
+        Note:
+            - 标准训练模式: 传入 model 参数
+            - 微调模式（分层学习率）: 传入 param_groups 参数
         """
+        # 验证参数
+        if model is None and param_groups is None:
+            raise ValueError("必须提供 model 或 param_groups 之一")
+        if model is not None and param_groups is not None:
+            logger.warning("同时提供了 model 和 param_groups，将使用 param_groups")
+        
         self.model = model
+        self.param_groups = param_groups
         self.gradient_accumulation_steps = gradient_accumulation_steps
         self.max_grad_norm = max_grad_norm
         self.scaler = scaler
         self.accumulated_steps = 0
         
-        # 获取可训练参数
-        if hasattr(model, 'get_trainable_parameters'):
-            trainable_params = model.get_trainable_parameters()
+        # 🔥 根据输入类型确定模式
+        if param_groups is not None:
+            # 微调模式：使用参数组
+            logger.info(f"🎯 使用微调模式（{len(param_groups)}个参数组）")
+            self.optimizer = self._create_optimizer_from_param_groups(
+                optimizer_name, param_groups, weight_decay
+            )
         else:
-            trainable_params = model.parameters()
-        
-        # 创建优化器
-        self.optimizer = self._create_optimizer(
-            optimizer_name, trainable_params, learning_rate, weight_decay
-        )
+            # 标准模式：从模型获取参数
+            logger.info("📦 使用标准训练模式")
+            # 获取可训练参数
+            if hasattr(model, 'get_trainable_parameters'):
+                trainable_params = model.get_trainable_parameters()
+            else:
+                trainable_params = model.parameters()
+            
+            # 创建优化器
+            self.optimizer = self._create_optimizer(
+                optimizer_name, trainable_params, learning_rate, weight_decay
+            )
         
         # 创建调度器
         self.scheduler = self._create_scheduler(scheduler_config)
@@ -195,12 +218,50 @@ class AdaptiveOptimizer:
             'update_count': 0
         }
     
+    def _create_optimizer_from_param_groups(self,
+                                           optimizer_name: str,
+                                           param_groups: List[Dict],
+                                           weight_decay: float) -> optim.Optimizer:
+        """从参数组创建优化器（用于微调）"""
+        optimizer_name = optimizer_name.lower()
+        
+        # 确保每个参数组都有weight_decay（如果没有指定的话）
+        for group in param_groups:
+            if 'weight_decay' not in group:
+                group['weight_decay'] = weight_decay
+        
+        if optimizer_name == "adamw":
+            optimizer = optim.AdamW(param_groups, betas=(0.9, 0.999), eps=1e-8)
+        elif optimizer_name == "adam":
+            optimizer = optim.Adam(param_groups, betas=(0.9, 0.999), eps=1e-8)
+        elif optimizer_name == "sgd":
+            optimizer = optim.SGD(param_groups, momentum=0.9, nesterov=True)
+        elif optimizer_name == "lion":
+            try:
+                from lion_pytorch import Lion
+                optimizer = Lion(param_groups)
+            except ImportError:
+                logger.warning("Lion optimizer不可用，回退到AdamW")
+                optimizer = optim.AdamW(param_groups, betas=(0.9, 0.999), eps=1e-8)
+        else:
+            raise ValueError(f"不支持的优化器: {optimizer_name}")
+        
+        # 打印各参数组的学习率
+        logger.info("📊 参数组学习率配置:")
+        for i, group in enumerate(optimizer.param_groups):
+            group_name = group.get('name', f'group_{i}')
+            param_count = sum(p.numel() for p in group['params'])
+            logger.info(f"  {group_name}: LR={group['lr']:.2e}, "
+                       f"参数={param_count:,}, WD={group.get('weight_decay', 0):.2e}")
+        
+        return optimizer
+    
     def _create_optimizer(self, 
                          optimizer_name: str, 
                          params, 
                          lr: float, 
                          weight_decay: float) -> optim.Optimizer:
-        """创建优化器"""
+        """创建优化器（标准模式）"""
         optimizer_name = optimizer_name.lower()
         
         if optimizer_name == "adamw":
@@ -322,16 +383,9 @@ class AdaptiveOptimizer:
             if self.scaler is not None:
                 self.scaler.unscale_(self.optimizer)
             
-            if hasattr(self.model, 'get_trainable_parameters'):
-                torch.nn.utils.clip_grad_norm_(
-                    self.model.get_trainable_parameters(), 
-                    self.max_grad_norm
-                )
-            else:
-                torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(), 
-                    self.max_grad_norm
-                )
+            # 🔥 获取所有可训练参数（兼容参数组模式）
+            all_params = self._get_all_trainable_params()
+            torch.nn.utils.clip_grad_norm_(all_params, self.max_grad_norm)
         
         # 优化器步骤
         if self.scaler is not None:
@@ -368,14 +422,26 @@ class AdaptiveOptimizer:
             else:
                 self.scheduler.step()
     
+    def _get_all_trainable_params(self):
+        """获取所有可训练参数（兼容标准模式和参数组模式）"""
+        if self.param_groups is not None:
+            # 参数组模式：从optimizer的param_groups获取
+            all_params = []
+            for group in self.optimizer.param_groups:
+                all_params.extend([p for p in group['params'] if p.requires_grad])
+            return all_params
+        else:
+            # 标准模式：从模型获取
+            if hasattr(self.model, 'get_trainable_parameters'):
+                return list(self.model.get_trainable_parameters())
+            else:
+                return [p for p in self.model.parameters() if p.requires_grad]
+    
     def _compute_grad_norm(self) -> float:
         """计算梯度范数"""
         total_norm = 0.0
         
-        if hasattr(self.model, 'get_trainable_parameters'):
-            parameters = self.model.get_trainable_parameters()
-        else:
-            parameters = self.model.parameters()
+        parameters = self._get_all_trainable_params()
         
         for param in parameters:
             if param.grad is not None:
@@ -388,10 +454,7 @@ class AdaptiveOptimizer:
         """计算参数范数"""
         total_norm = 0.0
         
-        if hasattr(self.model, 'get_trainable_parameters'):
-            parameters = self.model.get_trainable_parameters()
-        else:
-            parameters = self.model.parameters()
+        parameters = self._get_all_trainable_params()
         
         for param in parameters:
             param_norm = param.data.norm(2)

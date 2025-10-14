@@ -108,9 +108,16 @@ class Diffold(nn.Module):
         else:
             logger.warning(f"⚠ 警告: 未找到预训练权重文件: {rhofold_checkpoint_path}")
         
-        # 固定RhoFold模型参数，不参与训练
-        for param in self.rhofold.parameters():
-            param.requires_grad = False
+        # 🔥 根据配置决定是否冻结RhoFold参数
+        # 如果配置中指定了微调模式，则不预先冻结RhoFold参数
+        freeze_rhofold = getattr(config, 'freeze_rhofold', True)
+        if freeze_rhofold:
+            # 固定RhoFold模型参数，不参与训练
+            for param in self.rhofold.parameters():
+                param.requires_grad = False
+            logger.info("🔒 RhoFold参数已冻结（默认行为）")
+        else:
+            logger.info("🔓 RhoFold参数保持可训练状态（微调模式）")
         
         # 设置为评估模式
         self.rhofold.eval()
