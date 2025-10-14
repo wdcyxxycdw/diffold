@@ -23,3 +23,5 @@ casp/
 plots/
 rhofold_test_output/
 .cursor
+RNAdata/
+benchmark_data/
