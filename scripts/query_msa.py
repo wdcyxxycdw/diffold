@@ -140,12 +140,18 @@ def build_msa_online(
     # Parse all records (qblast may return multiple)
     records = list(NCBIXML.parse(handle))
 
-    # Write A3M
+    # Write A3M with deduplication
     with open(output_a3m, "w") as out_f:
         # Write master query
+        query_seq = sequence.strip().replace(" ", "").replace("\n", "")
         out_f.write(">query\n")
-        out_f.write(sequence.strip().replace(" ", "").replace("\n", "") + "\n")
+        out_f.write(query_seq + "\n")
+        
+        # Track seen sequences for deduplication
+        seen_sequences = {query_seq}  # 初始化时包含query序列
         num_written = 0
+        num_duplicates = 0
+        
         for rec in records:
             for alignment in rec.alignments:
                 if num_written >= hit_limit:
@@ -172,10 +178,20 @@ def build_msa_online(
                         qpos += 1
 
                 aligned_subject = "".join(aligned_subject_chars)
-
+                
+                # 去重：跳过已经见过的序列
+                if aligned_subject in seen_sequences:
+                    num_duplicates += 1
+                    continue
+                
+                seen_sequences.add(aligned_subject)
                 out_f.write(f">{header}\n")
                 out_f.write(aligned_subject + "\n")
                 num_written += 1
+        
+        # 打印去重统计信息
+        if num_duplicates > 0:
+            print(f"  (去重: 移除了 {num_duplicates} 条重复序列)", flush=True)
 
 
 def parse_args(argv=None):
