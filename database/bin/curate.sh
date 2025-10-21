@@ -6,8 +6,15 @@ cd $rootdir
 
 echo "extract fasta"
 if [ -s "rnacentral_species_specific_ids.fasta.gz" ];then
-    zcat rnacentral_species_specific_ids.fasta.gz|grep -ohP "^\S+"| $bindir/fastaNA -| $bindir/catRNAcentral - rnacentral.fasta rnacentral.tsv
-    rm rnacentral_species_specific_ids.fasta.gz
+    echo "  step 1: decompressing..."
+    zcat rnacentral_species_specific_ids.fasta.gz > temp_rnacentral_raw.fasta
+    echo "  step 2: filtering headers..."
+    grep -ohP "^\S+" temp_rnacentral_raw.fasta > temp_rnacentral_filtered.fasta
+    echo "  step 3: processing fasta..."
+    $bindir/fastaNA temp_rnacentral_filtered.fasta > temp_rnacentral_processed.fasta
+    echo "  step 4: cataloging..."
+    $bindir/catRNAcentral temp_rnacentral_processed.fasta rnacentral.fasta rnacentral.tsv
+    rm rnacentral_species_specific_ids.fasta.gz temp_rnacentral_raw.fasta temp_rnacentral_filtered.fasta temp_rnacentral_processed.fasta
 fi
 
 echo "makeblastdb"
@@ -26,6 +33,11 @@ for filename in `ls nt*tar.gz`;do
     rm $filename
 done
 if [ -s "nt.gz" ];then
-    zcat nt.gz | grep -ohP "^\S+" | $bindir/fastaNA - > nt
-    rm nt.gz
+    echo "  step 1: decompressing nt.gz..."
+    zcat nt.gz > temp_nt_raw.fasta
+    echo "  step 2: filtering headers..."
+    grep -ohP "^\S+" temp_nt_raw.fasta > temp_nt_filtered.fasta
+    echo "  step 3: processing fasta..."
+    $bindir/fastaNA temp_nt_filtered.fasta > nt
+    rm nt.gz temp_nt_raw.fasta temp_nt_filtered.fasta
 fi
