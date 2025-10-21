@@ -1050,17 +1050,19 @@ class DiffoldTrainer:
         """设置模型"""
         logger.info("初始化Diffold模型...")
         
-        # 🔥 在微调模式下，不预先冻结RhoFold参数
+        # 🔥 在微调模式下，不预先冻结RhoFold参数，也不加载RhoFold预训练权重
         if self.is_finetuning:
-            logger.info("🎯 微调模式：RhoFold参数将保持可训练状态")
+            logger.info("🎯 微调模式：跳过RhoFold权重加载（使用checkpoint中的权重）")
             # 临时设置配置，让Diffold不预先冻结RhoFold参数
             original_freeze_rhofold = getattr(self.config, 'freeze_rhofold', True)
             self.config.freeze_rhofold = False
-            model = Diffold(self.config, rhofold_checkpoint_path=self.config.rhofold_checkpoint)
+            # 不加载RhoFold预训练权重，因为checkpoint中已经包含了训练过的权重
+            model = Diffold(self.config, rhofold_checkpoint_path=self.config.rhofold_checkpoint, load_rhofold_weights=False)
             # 恢复原始配置
             self.config.freeze_rhofold = original_freeze_rhofold
         else:
-            model = Diffold(self.config, rhofold_checkpoint_path=self.config.rhofold_checkpoint)
+            # 正常训练模式，加载RhoFold预训练权重
+            model = Diffold(self.config, rhofold_checkpoint_path=self.config.rhofold_checkpoint, load_rhofold_weights=True)
         
         # 🔥 加载预训练检查点用于微调
         if self.is_finetuning and self.config.finetune.get('pretrained_checkpoint'):

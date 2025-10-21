@@ -46,7 +46,7 @@ class DiffoldLossBreakdown(NamedTuple):
     diffusion_smooth_lddt: torch.Tensor
 
 class Diffold(nn.Module):
-    def __init__(self, config, rhofold_checkpoint_path=None):
+    def __init__(self, config, rhofold_checkpoint_path=None, load_rhofold_weights=True):
         super().__init__()
 
         self.config = config
@@ -93,20 +93,23 @@ class Diffold(nn.Module):
         from rhofold.config import rhofold_config
         self.rhofold = RhoFold(rhofold_config)
         
-        # 加载RhoFold预训练权重
-        if rhofold_checkpoint_path is None:
-            rhofold_checkpoint_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'pretrained', 'model_20221010_params.pt')
-        
-        if os.path.exists(rhofold_checkpoint_path):
-            logger.info(f"正在加载RhoFold预训练权重: {rhofold_checkpoint_path}")
-            checkpoint = torch.load(rhofold_checkpoint_path, map_location='cpu', weights_only=False)
-            if 'model' in checkpoint:
-                self.rhofold.load_state_dict(checkpoint['model'])
+        # 🔥 加载RhoFold预训练权重（可控制是否加载）
+        if load_rhofold_weights:
+            if rhofold_checkpoint_path is None:
+                rhofold_checkpoint_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'pretrained', 'model_20221010_params.pt')
+            
+            if os.path.exists(rhofold_checkpoint_path):
+                logger.info(f"正在加载RhoFold预训练权重: {rhofold_checkpoint_path}")
+                checkpoint = torch.load(rhofold_checkpoint_path, map_location='cpu', weights_only=False)
+                if 'model' in checkpoint:
+                    self.rhofold.load_state_dict(checkpoint['model'])
+                else:
+                    self.rhofold.load_state_dict(checkpoint)
+                logger.info("✓ RhoFold预训练权重加载成功")
             else:
-                self.rhofold.load_state_dict(checkpoint)
-            logger.info("✓ RhoFold预训练权重加载成功")
+                logger.warning(f"⚠ 警告: 未找到预训练权重文件: {rhofold_checkpoint_path}")
         else:
-            logger.warning(f"⚠ 警告: 未找到预训练权重文件: {rhofold_checkpoint_path}")
+            logger.info("⊘ 跳过RhoFold预训练权重加载（Fine-tuning模式）")
         
         # 🔥 根据配置决定是否冻结RhoFold参数
         # 如果配置中指定了微调模式，则不预先冻结RhoFold参数
