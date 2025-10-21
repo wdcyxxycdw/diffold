@@ -1,4 +1,6 @@
 #!/bin/bash
+set -e  # 遇到错误立即退出
+
 FILE=`readlink -e $0`
 bindir=`dirname $FILE`
 rootdir=`dirname $bindir`
@@ -24,11 +26,12 @@ echo "unzip Rfam"
 if [ -s "Rfam.cm.gz" ];then
     gzip -d Rfam.cm.gz
 fi
-rm Rfam.cm.*
+rm -f Rfam.cm.i1*
 $bindir/cmpress Rfam.cm
 
 echo "extract nt"
-for filename in `ls nt*tar.gz`;do
+for filename in nt*tar.gz 2>/dev/null; do
+    [ -e "$filename" ] || continue
     tar -xvf $filename
     rm $filename
 done

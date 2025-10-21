@@ -7,7 +7,6 @@ processed_data/*
 .venv
 .vscode
 DS_Store
-data*
 filter_summary.txt
 mismatch_report.txt
 *.log
@@ -18,10 +17,8 @@ batch_inference_output/
 database/
 
 *.lock
-casp/
 
 plots/
 rhofold_test_output/
 .cursor
 RNAdata/
-benchmark_data/
