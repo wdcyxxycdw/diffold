@@ -49,7 +49,10 @@ class Diffold(nn.Module):
     def __init__(self, config, rhofold_checkpoint_path=None, load_rhofold_weights=True):
         super().__init__()
 
-        self.config = config
+        # 🔥 PEFT期望模型有config属性但会尝试调用.get()方法
+        # 创建一个简单的字典config以满足PEFT要求，实际的training config存在_training_config中
+        self.config = {}  # 空字典满足PEFT要求
+        self._training_config = config  # 实际的training配置
 
         dim_atom_inputs = 3
         atoms_per_window = 27

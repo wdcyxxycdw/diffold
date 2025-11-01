@@ -20,19 +20,13 @@ RUN apt-get update && \
 
 WORKDIR /workspace
 
-# 先复制依赖文件（利用Docker缓存）
-COPY pyproject.toml setup.py ./
-COPY diffold/ ./diffold/
-COPY rhofold/ ./rhofold/
+# 临时复制依赖文件用于安装
+COPY pyproject.toml README.md ./
+RUN mkdir -p diffold rhofold && \
+    touch diffold/__init__.py rhofold/__init__.py && \
+    python3 -m uv pip install . --system && \
+    rm -rf /workspace/*
 
-# 安装Python依赖（单独一层）
-RUN python3 -m uv pip install . --system
-
-# 再复制其他必要文件
-COPY train.py inference.py config_example.yaml ./
-COPY pretrained/ ./pretrained/
-COPY database/ ./database/
-
-# 训练入口
-ENTRYPOINT ["python3", "train.py"]
-CMD [] 
+# 默认入口点（代码通过volume挂载）
+ENTRYPOINT ["python3"]
+CMD ["--version"] 

@@ -142,9 +142,17 @@ def write_individual_fasta(pdb_name, sequences, output_dir):
     return output_file
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description='从PDB文件中提取RNA序列')
+    parser.add_argument('pdb_dir', nargs='?', default="benchmark_data/casp15/pdb_raw",
+                       help='PDB文件目录 (默认: benchmark_data/casp15/pdb_raw)')
+    parser.add_argument('--output', '-o', default="benchmark_data/casp15/seq",
+                       help='输出目录 (默认: benchmark_data/casp15/seq)')
+    args = parser.parse_args()
+    
     # PDB文件目录（使用原始raw文件，会自动处理多模型）
-    pdb_dir = "benchmark_data/casp15/pdb_raw"
-    output_dir = "benchmark_data/casp15/seq"
+    pdb_dir = args.pdb_dir
+    output_dir = args.output
     
     # 创建输出目录
     os.makedirs(output_dir, exist_ok=True)

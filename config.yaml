@@ -113,4 +113,80 @@ enhanced_features:
   error_recovery:
     auto_retry_on_oom: true
     max_retry_attempts: 3
-    reduce_batch_size_on_oom: true 
+    reduce_batch_size_on_oom: true
+
+# 🎯 微调配置
+finetune:
+  enable_finetuning: false  # 是否启用微调模式
+  pretrained_checkpoint: null  # 预训练模型检查点路径，如: "./checkpoints/best_model.pt"
+  
+  # 冻结策略选择
+  # - "none": 不冻结（全模型微调，适用于大数据集）
+  # - "rhofold_only": 只冻结RhoFold（推荐小数据集 <50样本）
+  # - "rhofold_backbone": 冻结RhoFold骨干（推荐中等数据集 50-200样本）
+  # - "rhofold_heads": 冻结RhoFold输出头
+  # - "diffusion_only": 只训练扩散模块
+  # - "confidence_only": 只训练置信度头
+  freeze_strategy: "none"
+  
+  # 自定义冻结层（仅在freeze_strategy="custom"时使用）
+  freeze_layers: []  # 例如: ["rhofold.msa_embedding", "rhofold.e2eformer"]
+  
+  # 全部解冻配置
+  unfreeze_after_epochs: 0  # 在指定epoch后解冻所有参数，0表示不自动解冻
+  
+  # 渐进式解冻配置
+  gradual_unfreeze:
+    enable: false  # 是否启用渐进式解冻
+    unfreeze_every: 5  # 每N个epoch解冻一层
+    unfreeze_order: "top_down"  # 解冻顺序: "top_down"从顶层开始, "bottom_up"从底层开始
+  
+  # 分层学习率配置（重要！）
+  learning_rate_scaling:
+    enable: true  # 是否对不同层使用不同学习率
+    frozen_lr_ratio: 0.0  # 冻结层的学习率比例（通常为0）
+    backbone_lr_ratio: 0.1  # RhoFold骨干网络学习率比例（相对于base_lr）
+    head_lr_ratio: 1.0  # 头部网络学习率比例（相对于base_lr）
+    layer_wise_decay: 0.9  # 层级学习率衰减因子（越深层学习率越小）
+  
+  # 微调专用预热策略
+  warmup_strategy:
+    enable: true  # 是否启用微调专用预热
+    warmup_epochs: 2  # 预热轮数
+    warmup_lr_ratio: 0.1  # 预热期间的学习率比例
+  
+  # 🎯 细粒度层控制（高级功能，仅控制E2Eformer块）
+  layer_control:
+    enable_layer_control: false  # 是否启用细粒度层控制
+    e2eformer:
+      freeze_blocks: []  # 冻结的E2Eformer块索引，例如: [0, 1, 2]
+      trainable_blocks: []  # 可训练的E2Eformer块索引，为空表示全部可训练
+      block_lr_ratios: {}  # 各块的学习率比例，例如: {0: 0.1, 1: 0.2, 2: 0.5}
+      gradual_unfreeze_blocks: false  # 是否渐进式解冻块
+      unfreeze_block_every: 2  # 每N个epoch解冻一个块
+
+# 🎯 LoRA (Low-Rank Adaptation) 配置
+lora:
+  enable: false  # 是否启用LoRA微调（推荐用于参数高效微调）
+  
+  # LoRA超参数
+  r: 8  # LoRA秩（rank），控制低秩矩阵的维度
+        # 推荐值: 小数据集4-8, 中等数据集8-16, 大数据集16-32
+  alpha: 8  # LoRA缩放因子，通常设置为r的1-2倍，影响LoRA权重的贡献度
+  dropout: 0.05  # LoRA层的dropout率，用于防止过拟合
+  bias: "none"  # bias处理策略: "none"不训练, "all"训练所有bias, "lora_only"仅训练LoRA的bias
+  
+  # LoRA应用策略（根据数据集大小选择）
+  # - "diffusion_only": 仅扩散模块（推荐<100样本，最保守）
+  # - "diffusion_confidence": 扩散+置信度头（推荐100-500样本）
+  # - "diffusion_all_heads": 扩散+所有头部（推荐500-1000样本）
+  # - "full_model": 全模型LoRA，包括RhoFold（推荐>1000样本）
+  # - "custom": 使用custom_target_modules自定义
+  strategy: "diffusion_confidence"
+  
+  # 自定义目标模块（仅在strategy="custom"时使用）
+  custom_target_modules: []  # 例如: ["diffusion.token_transformer", "confidence_head"]
+  
+  # LoRA权重保存选项
+  save_adapter_only: true  # 是否仅保存LoRA适配器权重（节省空间）
+  merge_weights_on_save: false  # 是否在最终保存时合并LoRA权重到基础模型

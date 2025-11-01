@@ -681,6 +681,19 @@ class TrainingConfig:
             }
         }
         
+        # 🎯 LoRA配置
+        self.lora = {
+            'enable': False,  # 是否启用LoRA微调
+            'r': 8,  # LoRA秩
+            'alpha': 8,  # LoRA缩放因子
+            'dropout': 0.05,  # LoRA dropout
+            'bias': 'none',  # bias处理策略
+            'strategy': 'diffusion_confidence',  # LoRA策略
+            'custom_target_modules': [],  # 自定义目标模块
+            'save_adapter_only': True,  # 仅保存适配器
+            'merge_weights_on_save': False  # 保存时合并权重
+        }
+        
         # 如果提供了配置文件，则加载配置
         if config_file:
             self.load_from_yaml(config_file)
@@ -829,6 +842,13 @@ class TrainingConfig:
                 if key in finetune_config and key in self.finetune:
                     self.finetune[key].update(finetune_config[key])
         
+        # 加载LoRA配置
+        if 'lora' in config_data:
+            lora_config = config_data['lora']
+            self.lora.update(lora_config)
+            if self.lora['enable']:
+                logger.info(f"🎯 LoRA配置已加载: rank={self.lora['r']}, strategy={self.lora['strategy']}")
+        
         logger.info("✅ 配置文件加载完成")
 
 
@@ -924,6 +944,10 @@ class DiffoldTrainer:
         self.training_monitor = None
         self.enhanced_optimizer = None
         self.enhanced_metrics = None
+        
+        # 🎯 初始化LoRA相关
+        self.is_lora_enabled = False
+        self.lora_manager = None
         
         if self.enhanced_enabled:
             self._setup_enhanced_features()
@@ -1068,8 +1092,33 @@ class DiffoldTrainer:
         if self.is_finetuning and self.config.finetune.get('pretrained_checkpoint'):
             self._load_pretrained_checkpoint(model)
         
+        # 🎯 应用LoRA（如果启用）
+        if self.config.lora.get('enable', False):
+            model = self._apply_lora(model)
+        
         logger.info("模型初始化完成")
         return model
+    
+    def _apply_lora(self, model):
+        """应用LoRA到模型"""
+        from diffold.lora_utils import LoRAManager
+        
+        logger.info("=" * 60)
+        logger.info("🎯 应用LoRA微调")
+        logger.info("=" * 60)
+        
+        try:
+            lora_manager = LoRAManager(self.config.lora)
+            peft_model = lora_manager.apply_lora(model)
+            self.lora_manager = lora_manager  # 保存以便后续使用
+            self.is_lora_enabled = True
+            logger.info("=" * 60)
+            return peft_model
+        except Exception as e:
+            logger.error(f"❌ LoRA应用失败: {e}")
+            logger.warning("⚠️ 继续使用标准微调模式")
+            self.is_lora_enabled = False
+            return model
     
     def _load_pretrained_checkpoint(self, model):
         """加载预训练检查点用于微调"""
@@ -1619,6 +1668,11 @@ class DiffoldTrainer:
     
     def save_checkpoint(self, epoch: int, is_best: bool = False):
         """保存检查点"""
+        # 🎯 LoRA模式下的特殊处理
+        if self.is_lora_enabled and self.config.lora.get('save_adapter_only', True):
+            self._save_lora_checkpoint(epoch, is_best)
+            return
+        
         # 处理DataParallel的state_dict
         if self.using_ddp:
             model_state_dict = self.model.module.state_dict()
@@ -1636,6 +1690,7 @@ class DiffoldTrainer:
             'using_data_parallel': self.using_ddp,
             'num_gpus': self.num_gpus,
             'enhanced_enabled': self.enhanced_enabled,
+            'is_lora_enabled': self.is_lora_enabled,
             'current_lr': self.get_current_lr(),  # 保存当前学习率
             'lr_modification_history': getattr(self, 'lr_modification_history', [])  # 保存学习率修改历史
         }
@@ -1664,6 +1719,62 @@ class DiffoldTrainer:
         lr_history_len = len(getattr(self, 'lr_modification_history', []))
         logger.info(f"💾 保存检查点: {checkpoint_path}")
         logger.info(f"📊 当前状态: 学习率={current_lr:.6f}, 修改历史={lr_history_len}条")
+    
+    def _save_lora_checkpoint(self, epoch: int, is_best: bool = False):
+        """保存LoRA检查点（仅保存适配器权重）"""
+        from diffold.lora_utils import LoRAManager
+        
+        # 获取实际的PEFT模型（处理DDP包装）
+        if self.using_ddp:
+            peft_model = self.model.module
+        else:
+            peft_model = self.model
+        
+        # 保存LoRA适配器
+        lora_dir = self.config.checkpoint_dir / f"lora_epoch_{epoch:03d}"
+        lora_dir.mkdir(exist_ok=True)
+        LoRAManager.save_lora_weights(peft_model, str(lora_dir))
+        
+        # 同时保存训练状态（优化器、调度器等）
+        training_state = {
+            'epoch': epoch,
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,
+            'metrics': self.metrics.to_dict(),
+            'config': self.config.__dict__,
+            'scaler_state_dict': self.scaler.state_dict() if self.scaler else None,
+            'current_lr': self.get_current_lr(),
+            'lr_modification_history': getattr(self, 'lr_modification_history', [])
+        }
+        
+        training_state_path = lora_dir / "training_state.pt"
+        torch.save(training_state, training_state_path)
+        
+        logger.info(f"💾 保存LoRA适配器: {lora_dir}")
+        
+        # 保存最佳模型
+        if is_best:
+            best_lora_dir = self.config.checkpoint_dir / "best_lora"
+            best_lora_dir.mkdir(exist_ok=True)
+            LoRAManager.save_lora_weights(peft_model, str(best_lora_dir))
+            best_training_state_path = best_lora_dir / "training_state.pt"
+            torch.save(training_state, best_training_state_path)
+            logger.info(f"保存最佳LoRA模型: {best_lora_dir}")
+        
+        # 清理旧的LoRA检查点
+        self.cleanup_old_lora_checkpoints()
+    
+    def cleanup_old_lora_checkpoints(self):
+        """清理旧的LoRA检查点文件夹"""
+        lora_dirs = list(self.config.checkpoint_dir.glob("lora_epoch_*"))
+        if len(lora_dirs) > self.config.keep_last_n_checkpoints:
+            # 按修改时间排序
+            lora_dirs.sort(key=lambda x: x.stat().st_mtime)
+            # 删除最旧的文件夹
+            import shutil
+            for old_dir in lora_dirs[:-self.config.keep_last_n_checkpoints]:
+                shutil.rmtree(old_dir)
+                logger.debug(f"删除旧LoRA检查点: {old_dir}")
     
     def cleanup_old_checkpoints(self):
         """清理旧的检查点文件"""
