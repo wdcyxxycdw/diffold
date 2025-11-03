@@ -216,34 +216,84 @@ def load_model(config: argparse.Namespace, logger: logging.Logger):
                 logger.error(f"检查点加载失败: {e2}")
                 raise
     
+    # 🎯 加载 LoRA 适配器（如果指定）
+    if hasattr(config, 'lora_path') and config.lora_path:
+        logger.info("=" * 60)
+        logger.info(f"🎯 加载 LoRA 适配器: {config.lora_path}")
+        logger.info("=" * 60)
+        try:
+            from diffold.lora_utils import LoRAManager
+            model = LoRAManager.load_lora_weights(model, config.lora_path)
+            logger.info("✅ LoRA 适配器加载成功!")
+            logger.info("=" * 60)
+        except Exception as e:
+            logger.error(f"❌ LoRA 适配器加载失败: {e}")
+            raise
+    
     return model
 
 def load_validation_data(config: argparse.Namespace, logger: logging.Logger):
     """加载验证数据"""
     logger.info("加载验证数据")
     
-    # 读取验证集样本列表
-    valid_list_file = Path(config.data_dir) / "list" / f"valid_fold-{config.fold}"
-    if not valid_list_file.exists():
-        raise FileNotFoundError(f"验证集列表文件不存在: {valid_list_file}")
-    
-    with open(valid_list_file, 'r') as f:
-        sample_names = [line.strip() for line in f if line.strip()]
-    
-    logger.info(f"验证集样本数量: {len(sample_names)}")
-    
-    # 创建数据加载器
-    train_loader, valid_loader = create_data_loaders(
-        data_dir=config.data_dir,
-        batch_size=1,  # 批量推理使用batch_size=1
-        max_length=config.max_sequence_length,
-        num_workers=config.num_workers,
-        fold=config.fold,
-        use_msa=config.use_msa,
-        use_all_folds=False,
-        world_size=1,
-        local_rank=0
-    )
+    # 🎯 支持两种模式：指定样本列表文件 或 使用 fold
+    if hasattr(config, 'sample_list_file') and config.sample_list_file:
+        # 模式1: 从指定的样本列表文件读取
+        sample_list_file = Path(config.sample_list_file)
+        if not sample_list_file.exists():
+            raise FileNotFoundError(f"样本列表文件不存在: {sample_list_file}")
+        
+        logger.info(f"从指定文件加载样本列表: {sample_list_file}")
+        with open(sample_list_file, 'r') as f:
+            sample_names = [line.strip() for line in f if line.strip()]
+        
+        logger.info(f"样本数量: {len(sample_names)}")
+        
+        # 创建自定义数据加载器（不使用 fold）
+        from diffold.dataloader import RNADataset
+        from torch.utils.data import DataLoader
+        
+        dataset = RNADataset(
+            data_dir=config.data_dir,
+            sample_names=sample_names,
+            max_length=config.max_sequence_length,
+            use_msa=config.use_msa,
+            is_training=False
+        )
+        
+        valid_loader = DataLoader(
+            dataset,
+            batch_size=1,
+            shuffle=False,
+            num_workers=config.num_workers,
+            collate_fn=dataset.collate_fn if hasattr(dataset, 'collate_fn') else None,
+            pin_memory=True
+        )
+        
+    else:
+        # 模式2: 使用原来的 fold 方式
+        valid_list_file = Path(config.data_dir) / "list" / f"valid_fold-{config.fold}"
+        if not valid_list_file.exists():
+            raise FileNotFoundError(f"验证集列表文件不存在: {valid_list_file}")
+        
+        logger.info(f"使用交叉验证 fold-{config.fold}")
+        with open(valid_list_file, 'r') as f:
+            sample_names = [line.strip() for line in f if line.strip()]
+        
+        logger.info(f"验证集样本数量: {len(sample_names)}")
+        
+        # 创建数据加载器
+        train_loader, valid_loader = create_data_loaders(
+            data_dir=config.data_dir,
+            batch_size=1,  # 批量推理使用batch_size=1
+            max_length=config.max_sequence_length,
+            num_workers=config.num_workers,
+            fold=config.fold,
+            use_msa=config.use_msa,
+            use_all_folds=False,
+            world_size=1,
+            local_rank=0
+        )
     
     return valid_loader, sample_names
 
@@ -581,14 +631,21 @@ def main():
                        help="数据目录路径")
     parser.add_argument("--output_dir", default="./batch_inference_output", 
                        help="输出目录路径")
-    parser.add_argument("--fold", type=int, default=3, 
-                       help="验证集折数")
+    
+    # 🎯 数据选择：支持两种模式
+    data_mode = parser.add_mutually_exclusive_group()
+    data_mode.add_argument("--fold", type=int, default=None, 
+                          help="使用交叉验证折数（例如: 0, 1, 2, 3, 4）")
+    data_mode.add_argument("--sample_list_file", type=str, default=None,
+                          help="指定样本列表文件路径（每行一个样本名称）")
     
     # 模型参数
     parser.add_argument("--checkpoint_path", required=True,
                        help="模型检查点路径")
     parser.add_argument("--rhofold_checkpoint", default="./pretrained/model_20221010_params.pt",
                        help="RhoFold检查点路径")
+    parser.add_argument("--lora_path", default=None,
+                       help="LoRA适配器路径（可选），如: ./checkpoints_finetune/best_lora")
     
     # 数据参数
     parser.add_argument("--max_sequence_length", type=int, default=256,
@@ -617,6 +674,10 @@ def main():
     
     args = parser.parse_args()
     
+    # 验证参数：必须指定 fold 或 sample_list_file 之一
+    if args.fold is None and args.sample_list_file is None:
+        parser.error("必须指定 --fold 或 --sample_list_file 之一")
+    
     # 设置设备
     if args.device == "auto":
         if torch.cuda.is_available():
@@ -628,13 +689,28 @@ def main():
     
     # 设置日志
     logger = setup_logging(args.output_dir, args.log_level)
+    logger.info("=" * 60)
     logger.info("开始批量推理和指标计算（多次采样版本）")
+    logger.info("=" * 60)
     logger.info(f"设备: {args.device}")
     logger.info(f"数据目录: {args.data_dir}")
     logger.info(f"输出目录: {args.output_dir}")
+    
+    # 显示数据选择模式
+    if args.sample_list_file:
+        logger.info(f"📄 数据模式: 指定样本列表")
+        logger.info(f"   样本列表文件: {args.sample_list_file}")
+    else:
+        logger.info(f"📊 数据模式: 交叉验证")
+        logger.info(f"   Fold: {args.fold}")
+    
+    logger.info(f"模型检查点: {args.checkpoint_path}")
+    if args.lora_path:
+        logger.info(f"🎯 LoRA适配器: {args.lora_path}")
     logger.info(f"每样本采样次数: {args.num_sampling}")
     logger.info(f"保存所有采样结果: {args.save_all_samples}")
     logger.info(f"筛选策略: {args.selection_strategy}")
+    logger.info("=" * 60)
     
     # 获取筛选函数
     selection_func = SELECTION_STRATEGIES[args.selection_strategy]

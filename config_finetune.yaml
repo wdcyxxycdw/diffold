@@ -1,0 +1,179 @@
+# Diffold 微调配置文件
+# 用于 fine_tuning_data 数据集（~640训练样本）
+
+# 数据配置
+data:
+  data_dir: "./fine_tuning_data"  # 使用微调数据
+  batch_size: 1  # 增加batch size以提高训练效率
+  max_sequence_length: 256  # RNA序列可能较长
+  num_workers: 4
+  use_msa: true
+  fold: 0  # 交叉验证折数 (0-4，因为数据集有5折)
+
+# 模型配置
+model:
+  rhofold_checkpoint: "./pretrained/model_20221010_params.pt"
+
+# 训练配置
+training:
+  num_epochs: 50  # 微调一般不需要太多epoch
+  learning_rate: 0.0001  # 1e-4，微调的标准学习率
+  weight_decay: 0.0001
+  grad_clip_norm: 1.0
+  warmup_steps: 500  # 减少预热步数（数据集较小）
+  
+  # 调度器配置
+  scheduler_type: "warmup_cosine"  # 使用warmup_cosine更适合微调
+  patience: 10
+  
+  # 验证配置
+  validate_every: 1
+  early_stopping_patience: 15  # 稍微提前停止
+
+# 输出配置
+output:
+  output_dir: "./output_finetune"
+  checkpoint_dir: "./checkpoints_finetune"
+  save_every: 1
+  keep_last_n_checkpoints: 10
+
+# 设备配置
+device:
+  device: "auto"
+  mixed_precision: true
+  use_torch_compile: false
+  torch_compile_mode: "default"
+
+# 多GPU配置
+multi_gpu:
+  use_data_parallel: true
+  gpu_ids: null  # 自动检测所有可用GPU
+
+# 交叉验证配置
+cross_validation:
+  fold: 2  # 当前使用的折数 (0-4)
+  num_folds: 5  # fine_tuning_data使用5折交叉验证
+  use_all_folds: false
+
+# 日志配置
+logging:
+  log_level: "INFO"
+
+# 测试配置
+test:
+  test_mode: false
+  test_samples: 10
+  test_epochs: 5
+
+# 🔥 增强功能配置
+enhanced_features:
+  enable_enhanced_training: true
+  
+  # 监控配置
+  monitoring:
+    enable_performance_monitoring: true
+    enable_memory_monitoring: true
+    enable_health_checking: true
+    monitoring_interval: 1
+    save_monitoring_plots: true
+    memory_cleanup_threshold: 0.85
+  
+  # 优化器配置
+  optimizer:
+    use_advanced_optimizer: true
+    optimizer_name: "adamw"
+    gradient_accumulation_steps: 1
+    scheduler_type: "warmup_cosine"
+  
+  # 数据加载器配置
+  dataloader:
+    enable_prefetch: true
+    prefetch_factor: 2
+    cache_size: 100
+    pin_memory: true
+    persistent_workers: true
+  
+  # 评估配置
+  evaluation:
+    compute_structure_metrics: true
+    compute_confidence_metrics: true
+    save_predictions: false
+  
+  # 错误恢复配置
+  error_recovery:
+    auto_retry_on_oom: true
+    max_retry_attempts: 3
+    reduce_batch_size_on_oom: true
+
+# 🎯 微调配置
+finetune:
+  enable_finetuning: true  # 启用微调模式
+  pretrained_checkpoint: "./pretrained/checkpoint_epoch_088.pt"  # 预训练模型路径
+  
+  # 冻结策略：中等数据集（500-1000样本）使用 rhofold_backbone
+  freeze_strategy: "rhofold_backbone"
+  
+  # 自定义冻结层（仅在freeze_strategy="custom"时使用）
+  freeze_layers: []
+  
+  # 全部解冻配置
+  unfreeze_after_epochs: 0  # 不自动解冻
+  
+  # 渐进式解冻配置
+  gradual_unfreeze:
+    enable: false
+    unfreeze_every: 5
+    unfreeze_order: "top_down"
+  
+  # 🔥 分层学习率配置（重要！）
+  learning_rate_scaling:
+    enable: true
+    frozen_lr_ratio: 0.0
+    backbone_lr_ratio: 0.1  # RhoFold骨干用10%的学习率
+    head_lr_ratio: 1.0  # 头部用完整学习率
+    layer_wise_decay: 0.9
+  
+  # 微调专用预热策略
+  warmup_strategy:
+    enable: true
+    warmup_epochs: 2
+    warmup_lr_ratio: 0.1
+  
+  # 🎯 细粒度层控制 - 前6层冻结，后6层学习率递增
+  layer_control:
+    enable_layer_control: true  # 启用细粒度层控制
+    e2eformer:
+      freeze_blocks: [0, 1, 2, 3, 4, 5]  # 冻结前6层（0-5）
+      trainable_blocks: []  # 空表示其他层都可训练
+      block_lr_ratios:  # 后6层（6-11）学习率逐渐增加
+        6: 0.3   # 第6层：30%学习率
+        7: 0.4   # 第7层：40%学习率
+        8: 0.5   # 第8层：50%学习率
+        9: 0.6   # 第9层：60%学习率
+        10: 0.8  # 第10层：80%学习率
+        11: 1.0  # 第11层（最后一层）：100%学习率
+      gradual_unfreeze_blocks: false  # 不使用渐进式解冻
+      unfreeze_block_every: 2
+
+# 🎯 LoRA (Low-Rank Adaptation) 配置
+# 推荐用于中等数据集（500-1000样本）
+lora:
+  enable: true  # 启用LoRA微调
+  
+  # LoRA超参数
+  r: 12  # rank=12适合中等数据集（500-1000样本）
+  alpha: 16  # alpha略大于r，增强LoRA贡献
+  dropout: 0.05
+  bias: "none"
+  
+  # LoRA应用策略
+  # diffusion_all_heads: 扩散模块+所有头部（推荐500-1000样本）
+  strategy: "diffusion_all_heads"
+  
+  # 自定义目标模块（仅在strategy="custom"时使用）
+  custom_target_modules: []
+  
+  # LoRA权重保存选项
+  save_adapter_only: true  # 仅保存LoRA适配器（节省空间）
+  merge_weights_on_save: false  # 最终保存时可以选择合并权重
+

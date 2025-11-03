@@ -23,3 +23,5 @@ rhofold_test_output/
 .cursor
 RNAdata/
 fine_tuning_data/
+output_finetune/
+checkpoints_finetune/
