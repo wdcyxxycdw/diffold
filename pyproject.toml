@@ -55,6 +55,7 @@ dependencies = [
     "seaborn>=0.13.2",
     "pandas>=2.3.1",
     "peft>=0.7.0",
+    "pdbfixer",
 ]
 
 [build-system]
@@ -65,6 +66,7 @@ build-backend = "hatchling.build"
 dev-dependencies = []
 
 [tool.uv.sources]
+pdbfixer = { git = "https://github.com/openmm/pdbfixer.git" }
 # If you need specific PyTorch versions with CUDA support, uncomment and modify:
 # torch = { index = "https://download.pytorch.org/whl/cu118" }
 # torchvision = { index = "https://download.pytorch.org/whl/cu118" }

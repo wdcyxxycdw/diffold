@@ -216,15 +216,17 @@ def deduplicate_internal(
 def main():
     parser = argparse.ArgumentParser(description='去除数据集内部重复和与现有数据集的重复')
     parser.add_argument('--new_data', type=str, required=True,
-                       help='新数据集目录（包含pdb/和seq/子目录）')
+                       help='新数据集目录（包含pdb/和seq/或sequences/子目录）')
     parser.add_argument('--reference_data', type=str, default=None,
-                       help='参考数据集目录（包含pdb/和seq/子目录），如果提供则去除与之重复的序列')
+                       help='参考数据集目录（包含pdb/和seq/或sequences/子目录），如果提供则去除与之重复的序列')
     parser.add_argument('--output', type=str, required=True,
                        help='输出目录（去重后的数据）')
     parser.add_argument('--similarity', type=float, default=0.95,
                        help='相似度阈值 (默认: 0.95, 即95%%)')
     parser.add_argument('--threads', type=int, default=8,
                        help='CD-HIT线程数 (默认: 8)')
+    parser.add_argument('--seq_dir_name', type=str, default='auto',
+                       help='序列目录名称 (默认: auto，自动检测 seq 或 sequences)')
     
     args = parser.parse_args()
     
@@ -242,8 +244,21 @@ def main():
     logger.info(f"🧵 线程数: {args.threads}")
     logger.info("=" * 60)
     
+    # 自动检测序列目录名称
+    if args.seq_dir_name == 'auto':
+        if (new_data_dir / "sequences").exists():
+            seq_dir_name = "sequences"
+        elif (new_data_dir / "seq").exists():
+            seq_dir_name = "seq"
+        else:
+            logger.error(f"❌ 在 {new_data_dir} 中未找到 'seq' 或 'sequences' 目录")
+            return
+        logger.info(f"📂 自动检测到序列目录: {seq_dir_name}")
+    else:
+        seq_dir_name = args.seq_dir_name
+    
     # 检查目录
-    new_seq_dir = new_data_dir / "seq"
+    new_seq_dir = new_data_dir / seq_dir_name
     new_pdb_dir = new_data_dir / "pdb"
     
     if not new_seq_dir.exists():
@@ -266,12 +281,18 @@ def main():
     # 如果提供了参考数据集，则去除与之重复的序列
     if args.reference_data:
         ref_data_dir = Path(args.reference_data)
-        ref_seq_dir = ref_data_dir / "seq"
         
-        if not ref_seq_dir.exists():
-            logger.warning(f"⚠️  参考数据集序列目录不存在: {ref_seq_dir}")
-            logger.warning("⚠️  跳过与参考数据集的去重")
+        # 自动检测参考数据集的序列目录
+        if (ref_data_dir / "sequences").exists():
+            ref_seq_dir = ref_data_dir / "sequences"
+        elif (ref_data_dir / "seq").exists():
+            ref_seq_dir = ref_data_dir / "seq"
         else:
+            logger.warning(f"⚠️  参考数据集序列目录不存在 (检查了 seq 和 sequences)")
+            logger.warning("⚠️  跳过与参考数据集的去重")
+            ref_seq_dir = None
+        
+        if ref_seq_dir:
             logger.info("\n📊 第三步: 与参考数据集比较...")
             ref_sequences = collect_sequences(ref_seq_dir)
             logger.info(f"  参考数据集有 {len(ref_sequences)} 个序列")
@@ -293,7 +314,7 @@ def main():
     logger.info("\n📊 最后一步: 复制保留的文件...")
     output_dir.mkdir(parents=True, exist_ok=True)
     output_pdb_dir = output_dir / "pdb"
-    output_seq_dir = output_dir / "seq"
+    output_seq_dir = output_dir / seq_dir_name  # 使用检测到的目录名称
     output_pdb_dir.mkdir(exist_ok=True)
     output_seq_dir.mkdir(exist_ok=True)
     
