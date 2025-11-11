@@ -249,25 +249,35 @@ def load_validation_data(config: argparse.Namespace, logger: logging.Logger):
         
         logger.info(f"样本数量: {len(sample_names)}")
         
-        # 创建自定义数据加载器（不使用 fold）
-        from diffold.dataloader import RNADataset
-        from torch.utils.data import DataLoader
+        # 创建临时 fold 文件（复用现有的 dataloader）
+        temp_list_dir = Path(config.data_dir) / "list"
+        temp_list_dir.mkdir(parents=True, exist_ok=True)
         
-        dataset = RNADataset(
+        # 创建验证集文件
+        temp_valid_file = temp_list_dir / "valid_fold-999"
+        with open(temp_valid_file, 'w') as f:
+            for name in sample_names:
+                f.write(f"{name}\n")
+        
+        # 创建训练集文件（放入相同样本，避免空列表报错，反正只用验证集）
+        temp_train_file = temp_list_dir / "fold-999_train_ids"
+        with open(temp_train_file, 'w') as f:
+            for name in sample_names:
+                f.write(f"{name}\n")
+        
+        logger.info(f"创建临时 fold 文件: {temp_valid_file}")
+        
+        # 使用临时 fold 加载数据
+        train_loader, valid_loader = create_data_loaders(
             data_dir=config.data_dir,
-            sample_names=sample_names,
-            max_length=config.max_sequence_length,
-            use_msa=config.use_msa,
-            is_training=False
-        )
-        
-        valid_loader = DataLoader(
-            dataset,
             batch_size=1,
-            shuffle=False,
+            max_length=config.max_sequence_length,
             num_workers=config.num_workers,
-            collate_fn=dataset.collate_fn if hasattr(dataset, 'collate_fn') else None,
-            pin_memory=True
+            fold=999,  # 使用临时 fold 编号
+            use_msa=config.use_msa,
+            use_all_folds=False,
+            world_size=1,
+            local_rank=0
         )
         
     else:
@@ -426,8 +436,22 @@ def compute_metrics_for_sample(model: Diffold,
         pdb_output_dir = Path(output_dir) / "pdb_files"
         pdb_output_dir.mkdir(parents=True, exist_ok=True)
         
-        # 获取序列
+        # 获取序列 - 优先从batch中获取，确保与当前样本匹配
+        # batch['names'] 包含实际的样本名称列表
+        batch_sample_name = batch.get('names', [sample_name])[0] if batch.get('names') else sample_name
+        
+        # 验证样本名称是否匹配
+        if batch_sample_name != sample_name:
+            logger.warning(f"样本名称不匹配: batch中为 {batch_sample_name}, 期望为 {sample_name}")
+            # 使用batch中的实际样本名称
+            sample_name = batch_sample_name
+        
         sequence = sequences[0] if sequences else ""
+        
+        # 如果序列为空，尝试从序列文件中读取
+        if not sequence:
+            logger.warning(f"样本 {sample_name}: batch中序列为空，尝试从文件读取")
+            # 这里可以添加从文件读取序列的逻辑，但通常batch中应该有序列
         
         # 保存最佳采样的PDB文件
         best_pdb_path = pdb_output_dir / f"{sample_name}_best.pdb"
@@ -464,8 +488,8 @@ def compute_metrics_for_sample(model: Diffold,
         result_dict = {
             'sample_name': sample_name,
             'status': 'success',
-            'sequence_length': len(sequences[0]) if sequences else 0,
-            'sequence': sequences[0] if sequences else "",
+            'sequence_length': len(sequence) if sequence else 0,
+            'sequence': sequence,
             'num_sampling': num_sampling,
             'successful_samples': len(all_samples),
             'best_sample_idx': best_sample['sample_idx'],
@@ -736,11 +760,22 @@ def main():
             logger.info(f"限制处理样本数为: {len(sample_names)}")
         
         logger.info("开始批量推理...")
-        for i, (batch, sample_name) in enumerate(tqdm(zip(valid_loader, sample_names), 
-                                                   total=len(sample_names),
-                                                   desc="处理样本")):
+        # 使用batch中的实际样本名称，而不是依赖外部sample_names的顺序
+        # 这样可以避免顺序不匹配的问题
+        for i, batch in enumerate(tqdm(valid_loader, 
+                                     total=len(valid_loader),
+                                     desc="处理样本")):
             
-            logger.debug(f"处理样本 {i+1}/{len(sample_names)}: {sample_name}")
+            # 从batch中获取实际的样本名称
+            batch_names = batch.get('names', [])
+            if not batch_names:
+                logger.warning(f"Batch {i}: 未找到样本名称，跳过")
+                continue
+            
+            # batch_size=1时，取第一个样本名称
+            sample_name = batch_names[0] if batch_names else f"unknown_{i}"
+            
+            logger.debug(f"处理样本 {i+1}/{len(valid_loader)}: {sample_name}")
             
             # 计算指标
             result = compute_metrics_for_sample(

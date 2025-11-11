@@ -14,8 +14,8 @@ import warnings
 warnings.filterwarnings('ignore')
 
 import os
-SAVE_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "plots", "diffold")
-LOAD_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "batch_inference_output", "batch_inference_results.csv")
+SAVE_PATH = "/work/gs58/s58009/rhofold/plots/casp15_ft2"
+LOAD_PATH = "/work/gs58/s58009/archive/ft2/casp15_eval_results/merged_results.csv"
 
 # 设置字体和样式 - 使用英文标签避免字体问题
 plt.rcParams['font.family'] = 'DejaVu Sans'

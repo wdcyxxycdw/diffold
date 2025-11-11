@@ -2055,6 +2055,12 @@ class DiffoldTrainer:
             is_best = False
             if valid_loss is not None:
                 is_best = self.metrics.update_valid(valid_loss, epoch)
+                
+                # 🔥 在分布式训练中，同步 is_best 标志，确保所有GPU一致保存最佳模型
+                if self.world_size > 1:
+                    best_tensor = torch.tensor(1 if is_best else 0, dtype=torch.int, device=self.device)
+                    dist.broadcast(best_tensor, src=0, group=None)
+                    is_best = (best_tensor.item() == 1)
             
             # 🔥 记录增强评估指标
             if self.enhanced_metrics:
@@ -2165,6 +2171,9 @@ class DiffoldTrainer:
                 log_msg += f" | LR: {current_lr:.2e} | {epoch_time:.0f}s {status_icon}"
                 if is_best:
                     log_msg += " 🏆 NEW BEST"
+                else:
+                    # 显示早停计数器，帮助诊断早停状态
+                    log_msg += f" | 早停: {self.metrics.early_stopping_counter}/{self.config.early_stopping_patience}"
                 
                 # 🔥 添加分布式同步验证信息
                 if self.world_size > 1:
@@ -2192,10 +2201,28 @@ class DiffoldTrainer:
                     self.training_monitor.generate_performance_plots()
             
             # 早停检查
-            if (self.metrics.early_stopping_counter >= self.config.early_stopping_patience 
-                and not self.config.test_mode):
+            # 🔥 在分布式训练中，需要同步早停决策，确保所有GPU进程一致
+            should_early_stop = (self.metrics.early_stopping_counter >= self.config.early_stopping_patience 
+                                 and not self.config.test_mode)
+            
+            # 在分布式训练中，广播主进程的早停决策到所有GPU
+            if self.world_size > 1:
+                # 将布尔值转换为张量
+                stop_tensor = torch.tensor(1 if should_early_stop else 0, 
+                                          dtype=torch.int, device=self.device)
+                # 从主进程广播决策到所有进程
+                dist.broadcast(stop_tensor, src=0, group=None)
+                # 所有进程使用相同的决策
+                should_early_stop = (stop_tensor.item() == 1)
+            
+            if should_early_stop:
                 if self.is_main_process:
-                    logger.info(f"早停触发 (patience={self.config.early_stopping_patience})")
+                    logger.info(f"🛑 早停触发 (patience={self.config.early_stopping_patience})")
+                    logger.info(f"   最佳验证损失: {self.metrics.best_valid_loss:.6f} (Epoch {self.metrics.best_epoch+1})")
+                    logger.info(f"   当前早停计数: {self.metrics.early_stopping_counter}")
+                # 确保所有进程在退出前同步
+                if self.world_size > 1:
+                    dist.barrier()
                 break
         
         # 训练结束

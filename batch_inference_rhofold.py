@@ -31,6 +31,9 @@ from diffold.metrics import RNAEvaluationMetrics
 # 导入PDB转换功能
 from diffold.rhofold_output import rhofold_coords_to_pdb, validate_rhofold_output, extract_rhofold_features
 
+# 导入Amber relaxation
+from rhofold.relax.relax import AmberRelaxation
+
 # RhoFold是确定性模型，不需要采样相关的函数
 
 def setup_logging(output_dir: str, log_level: str = "INFO"):
@@ -217,17 +220,26 @@ def compute_metrics_for_sample(model: RhoFold,
                 'error': 'no_target_coords'
             }
         
-        # 获取序列
-        sequence = sequences[0] if sequences else ""
+        # 从原始序列文件读取完整序列，而不是使用可能被截断的数据加载器序列
+        sequence_file = Path(config.data_dir) / "sequences" / f"{sample_name}.fasta"
+        if sequence_file.exists():
+            with open(sequence_file, 'r') as f:
+                lines = f.readlines()
+                sequence = ''.join([line.strip() for line in lines if not line.startswith('>')])
+            logger.debug(f"样本 {sample_name}: 从文件读取完整序列，长度: {len(sequence)}")
+        else:
+            # 回退到数据加载器提供的序列
+            sequence = sequences[0] if sequences else ""
+            logger.warning(f"样本 {sample_name}: 未找到序列文件，使用数据加载器序列，长度: {len(sequence)}")
         
         # 准备RhoFold输入
-        # 查找现有MSA文件或创建临时FASTA文件
-        msa_path = get_msa_or_fasta(sequence, sample_name, config, logger)
+        # 查找现有MSA文件
+        msa_path = find_existing_msa(sample_name, config, logger)
         
         logger.debug(f"样本 {sample_name}: 开始RhoFold推理")
         
         try:
-            # 创建临时FASTA文件
+            # 创建临时FASTA文件（使用完整序列）
             temp_fasta_path = Path(config.output_dir) / "temp" / f"{sample_name}.fasta"
             temp_fasta_path.parent.mkdir(parents=True, exist_ok=True)
             
@@ -235,7 +247,12 @@ def compute_metrics_for_sample(model: RhoFold,
                 f.write(f">{sample_name}\n{sequence}\n")
             
             # 获取RhoFold特征
-            data_dict = get_features(str(temp_fasta_path), msa_path)
+            # 如果没有MSA文件，使用单序列预测
+            if msa_path is None:
+                logger.info(f"样本 {sample_name}: 未找到MSA文件，使用单序列模式")
+                data_dict = get_features(str(temp_fasta_path), str(temp_fasta_path))
+            else:
+                data_dict = get_features(str(temp_fasta_path), msa_path)
             
             # RhoFold模型推理
             with torch.no_grad():
@@ -335,22 +352,41 @@ def compute_metrics_for_sample(model: RhoFold,
         pdb_output_dir = Path(output_dir) / "pdb_files"
         pdb_output_dir.mkdir(parents=True, exist_ok=True)
         
-        # 保存预测结果的PDB文件
-        pdb_path = pdb_output_dir / f"{sample_name}.pdb"
+        # 保存预测结果的PDB文件（unrelaxed）
+        unrelaxed_pdb_path = pdb_output_dir / f"{sample_name}.pdb"
+        success = False
         try:
             success = rhofold_coords_to_pdb(
                 predicted_coords=predicted_coords,
                 sequence=sequence,
-                output_path=str(pdb_path),
+                output_path=str(unrelaxed_pdb_path),
                 confidence=confidence,
                 model_instance=model,  # 传递RhoFold模型实例
                 logger_instance=logger
             )
             if success:
-                pdb_file_paths.append(str(pdb_path))
-                logger.debug(f"样本 {sample_name}: PDB文件已保存到 {pdb_path}")
+                pdb_file_paths.append(str(unrelaxed_pdb_path))
+                logger.debug(f"样本 {sample_name}: Unrelaxed PDB文件已保存到 {unrelaxed_pdb_path}")
         except Exception as e:
             logger.warning(f"样本 {sample_name}: PDB文件保存失败: {e}")
+            success = False
+        
+        # Amber relaxation
+        relaxed_pdb_path = None
+        if config.relax_steps is not None:
+            relax_steps = int(config.relax_steps)
+            if relax_steps > 0 and success:  # 只有在成功保存了unrelaxed PDB后才进行relax
+                try:
+                    logger.debug(f"样本 {sample_name}: 开始Amber优化，步数: {relax_steps}")
+                    with timing(f'Amber Relaxation: {relax_steps} iterations', logger=logger):
+                        amber_relax = AmberRelaxation(max_iterations=relax_steps, logger=logger)
+                        relaxed_pdb_path = pdb_output_dir / f"{sample_name}_relaxed_{relax_steps}.pdb"
+                        amber_relax.process(str(unrelaxed_pdb_path), str(relaxed_pdb_path))
+                        pdb_file_paths.append(str(relaxed_pdb_path))
+                        logger.debug(f"样本 {sample_name}: Relaxed PDB文件已保存到 {relaxed_pdb_path}")
+                except Exception as e:
+                    logger.warning(f"样本 {sample_name}: Amber优化失败: {e}")
+                    logger.info(f"样本 {sample_name}: 继续使用unrelaxed模型")
         
         # 准备返回结果
         result_dict = {
@@ -362,7 +398,8 @@ def compute_metrics_for_sample(model: RhoFold,
             'predicted_coords_shape': list(predicted_coords.shape),
             'target_coords_shape': list(target_coords.shape),
             'pdb_file_paths': pdb_file_paths,
-            'pdb_path': str(pdb_path) if pdb_file_paths else None,
+            'pdb_path': str(unrelaxed_pdb_path) if pdb_file_paths else None,
+            'relaxed_pdb_path': str(relaxed_pdb_path) if relaxed_pdb_path else None,
             # 使用计算的指标
             **sample_metrics,
             'detailed_metrics': detailed_metrics
@@ -517,6 +554,11 @@ def main():
     parser.add_argument("--max_samples", type=int, default=None,
                        help="最大处理样本数（用于测试）")
     
+    # Amber relaxation参数
+    parser.add_argument("--relax_steps", type=int, default=None,
+                       help="Number of steps for Amber relaxation (default: None, no relaxation). "
+                            "If set to a positive value, will perform structure refinement using Amber.")
+    
     args = parser.parse_args()
     
     # 设置设备
@@ -535,6 +577,10 @@ def main():
     logger.info(f"数据目录: {args.data_dir}")
     logger.info(f"输出目录: {args.output_dir}")
     logger.info(f"单序列预测模式: {args.single_seq_pred}")
+    if args.relax_steps is not None and args.relax_steps > 0:
+        logger.info(f"Amber relaxation已启用，步数: {args.relax_steps}")
+    else:
+        logger.info("Amber relaxation未启用")
     
     try:
         # 加载RhoFold模型

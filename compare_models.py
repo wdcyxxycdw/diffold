@@ -23,7 +23,7 @@ def load_and_prepare_data():
     """Load and prepare data for both models"""
     
     # Load Diffold data
-    diffold_path = "batch_inference_output/batch_inference_results.csv"
+    diffold_path = "casp15_eval_results/merged_results.csv"
     diffold_df = pd.read_csv(diffold_path)
     diffold_df = diffold_df[diffold_df['status'] == 'success'].copy()
     
@@ -37,16 +37,16 @@ def load_and_prepare_data():
     }
     
     # Load RhoFold data
-    rhofold_path = "rhofold_test_output/rhofold_test_results.csv"
+    rhofold_path = "../archive/casp15_rhofold/rhofold_test_results.csv"
     rhofold_df = pd.read_csv(rhofold_path)
     rhofold_df = rhofold_df[rhofold_df['status'] == 'success'].copy()
     
     # Select columns for RhoFold data
     rhofold_data = {
         'rmsd': rhofold_df['rmsd'].values,
-        'tm_score': rhofold_df['tm_score'].values,
-        'lddt': rhofold_df['lddt'].values,
-        'clash_score': rhofold_df['clash_score'].values,
+        'tm_score': rhofold_df['avg_tm_score'].values,
+        'lddt': rhofold_df['avg_lddt'].values,
+        'clash_score': rhofold_df['avg_clash_score'].values,
         'model': ['RhoFold+'] * len(rhofold_df)
     }
     
@@ -105,10 +105,13 @@ def create_comparison_violin_plots(df, save_path="plots"):
     for i, (metric, info) in enumerate(metrics_info.items()):
         ax = axes[i]
         
+        # Prepare data
+        diffold_data = df[df['model'] == 'Diffold'][metric].dropna()
+        rhofold_data = df[df['model'] == 'RhoFold+'][metric].dropna()
+        
         # Create violin plot
         violin_parts = ax.violinplot(
-            [df[df['model'] == 'Diffold'][metric].dropna(), 
-             df[df['model'] == 'RhoFold+'][metric].dropna()],
+            [diffold_data, rhofold_data],
             positions=[0, 1],
             widths=0.6,
             showmeans=False,
@@ -120,9 +123,23 @@ def create_comparison_violin_plots(df, save_path="plots"):
         colors = [info['color_diffold'], info['color_rhofold']]
         for pc, color in zip(violin_parts['bodies'], colors):
             pc.set_facecolor(color)
-            pc.set_alpha(0.8)
+            pc.set_alpha(0.6)
             pc.set_edgecolor('black')
             pc.set_linewidth(1.5)
+        
+        # Add data points with jitter (more concentrated around center)
+        np.random.seed(42)  # For reproducible jitter
+        jitter_width = 0.08  # Reduced jitter width for better centering
+        
+        # Add Diffold data points (using dark colors for better visibility)
+        diffold_jitter = np.random.normal(0, jitter_width, size=len(diffold_data))
+        ax.scatter(diffold_jitter, diffold_data, 
+                  color='#1a5f1a', s=50, alpha=0.9, edgecolors='black', linewidths=1.5, zorder=3)
+        
+        # Add RhoFold+ data points (using dark colors for better visibility)
+        rhofold_jitter = np.random.normal(1, jitter_width, size=len(rhofold_data))
+        ax.scatter(rhofold_jitter, rhofold_data, 
+                  color='#8b0000', s=50, alpha=0.9, edgecolors='black', linewidths=1.5, zorder=3)
         
         # Set labels and title
         ax.set_xticks([0, 1])
@@ -194,9 +211,23 @@ def create_individual_comparison_plots(df, save_path="plots"):
         colors = [info['color_diffold'], info['color_rhofold']]
         for pc, color in zip(violin_parts['bodies'], colors):
             pc.set_facecolor(color)
-            pc.set_alpha(0.8)
+            pc.set_alpha(0.6)
             pc.set_edgecolor('black')
             pc.set_linewidth(2)
+        
+        # Add data points with jitter (more concentrated around center)
+        np.random.seed(42)  # For reproducible jitter
+        jitter_width = 0.08  # Reduced jitter width for better centering
+        
+        # Add Diffold data points (using dark colors for better visibility)
+        diffold_jitter = np.random.normal(0, jitter_width, size=len(diffold_data))
+        ax.scatter(diffold_jitter, diffold_data, 
+                  color='#1a5f1a', s=60, alpha=0.9, edgecolors='black', linewidths=1.5, zorder=3)
+        
+        # Add RhoFold+ data points (using dark colors for better visibility)
+        rhofold_jitter = np.random.normal(1, jitter_width, size=len(rhofold_data))
+        ax.scatter(rhofold_jitter, rhofold_data, 
+                  color='#8b0000', s=60, alpha=0.9, edgecolors='black', linewidths=1.5, zorder=3)
         
         # Set labels
         ax.set_xticks([0, 1])
