@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from pathlib import Path
 import warnings
+import argparse
 warnings.filterwarnings('ignore')
 
 # 设置字体和样式
@@ -19,17 +20,33 @@ plt.rcParams['axes.unicode_minus'] = False
 plt.style.use('seaborn-v0_8')
 sns.set_palette("husl")
 
-def load_and_prepare_data():
+# 统一的颜色配置
+MODEL_COLORS = {
+    'Diffold': {
+        'violin': '#6baed6',      # 浅蓝色 (violin plot)
+        'points': '#08519c',       # 深蓝色 (数据点)
+        'edge': '#08306b'          # 更深蓝色 (边框)
+    },
+    'Rhofold+(unrelaxed)': {
+        'violin': '#fd8d3c',       # 浅橙色 (violin plot)
+        'points': '#d94801',       # 深橙色 (数据点)
+        'edge': '#7f2704'          # 更深橙色 (边框)
+    }
+}
+
+def load_and_prepare_data(diffold_path, rhofold_path):
     """Load and prepare data for both models"""
     
     # Load Diffold data
-    diffold_path = "casp15_eval_results/merged_results.csv"
+    print(f"Loading Diffold data from: {diffold_path}")
     diffold_df = pd.read_csv(diffold_path)
     diffold_df = diffold_df[diffold_df['status'] == 'success'].copy()
     
     # Select appropriate columns for Diffold data
+    # Try 'best_rmsd' first, fallback to 'rmsd' if not available
+    rmsd_col = 'best_rmsd' if 'best_rmsd' in diffold_df.columns else 'rmsd'
     diffold_data = {
-        'rmsd': diffold_df['best_rmsd'].values,
+        'rmsd': diffold_df[rmsd_col].values,
         'tm_score': diffold_df['avg_tm_score'].values,
         'lddt': diffold_df['avg_lddt'].values,
         'clash_score': diffold_df['avg_clash_score'].values,
@@ -37,7 +54,7 @@ def load_and_prepare_data():
     }
     
     # Load RhoFold data
-    rhofold_path = "../archive/casp15_rhofold/rhofold_test_results.csv"
+    print(f"Loading RhoFold data from: {rhofold_path}")
     rhofold_df = pd.read_csv(rhofold_path)
     rhofold_df = rhofold_df[rhofold_df['status'] == 'success'].copy()
     
@@ -47,7 +64,7 @@ def load_and_prepare_data():
         'tm_score': rhofold_df['avg_tm_score'].values,
         'lddt': rhofold_df['avg_lddt'].values,
         'clash_score': rhofold_df['avg_clash_score'].values,
-        'model': ['RhoFold+'] * len(rhofold_df)
+        'model': ['Rhofold+(unrelaxed)'] * len(rhofold_df)
     }
     
     # Combine data
@@ -59,7 +76,7 @@ def load_and_prepare_data():
     combined_df = pd.DataFrame(combined_data)
     
     print(f"Diffold samples: {len(diffold_df)}")
-    print(f"RhoFold+ samples: {len(rhofold_df)}")
+    print(f"Rhofold+(unrelaxed) samples: {len(rhofold_df)}")
     print(f"Total combined samples: {len(combined_df)}")
     
     return combined_df, diffold_df, rhofold_df
@@ -71,27 +88,19 @@ def create_comparison_violin_plots(df, save_path="plots"):
     metrics_info = {
         'rmsd': {
             'label': 'RMSD (Angstrom)',
-            'better': 'lower',
-            'color_diffold': '#2ecc71',
-            'color_rhofold': '#e74c3c'
+            'better': 'lower'
         },
         'tm_score': {
             'label': 'TM-Score',
-            'better': 'higher', 
-            'color_diffold': '#3498db',
-            'color_rhofold': '#f39c12'
+            'better': 'higher'
         },
         'lddt': {
             'label': 'lDDT Score',
-            'better': 'higher',
-            'color_diffold': '#9b59b6',
-            'color_rhofold': '#1abc9c'
+            'better': 'higher'
         },
         'clash_score': {
             'label': 'Clash Score',
-            'better': 'lower',
-            'color_diffold': '#e67e22',
-            'color_rhofold': '#34495e'
+            'better': 'lower'
         }
     }
     
@@ -107,7 +116,7 @@ def create_comparison_violin_plots(df, save_path="plots"):
         
         # Prepare data
         diffold_data = df[df['model'] == 'Diffold'][metric].dropna()
-        rhofold_data = df[df['model'] == 'RhoFold+'][metric].dropna()
+        rhofold_data = df[df['model'] == 'Rhofold+(unrelaxed)'][metric].dropna()
         
         # Create violin plot
         violin_parts = ax.violinplot(
@@ -119,11 +128,11 @@ def create_comparison_violin_plots(df, save_path="plots"):
             showextrema=False
         )
         
-        # Set colors
-        colors = [info['color_diffold'], info['color_rhofold']]
+        # Set colors using unified color scheme
+        colors = [MODEL_COLORS['Diffold']['violin'], MODEL_COLORS['Rhofold+(unrelaxed)']['violin']]
         for pc, color in zip(violin_parts['bodies'], colors):
             pc.set_facecolor(color)
-            pc.set_alpha(0.6)
+            pc.set_alpha(0.7)
             pc.set_edgecolor('black')
             pc.set_linewidth(1.5)
         
@@ -131,15 +140,21 @@ def create_comparison_violin_plots(df, save_path="plots"):
         np.random.seed(42)  # For reproducible jitter
         jitter_width = 0.08  # Reduced jitter width for better centering
         
-        # Add Diffold data points (using dark colors for better visibility)
+        # Add Diffold data points with unified colors
         diffold_jitter = np.random.normal(0, jitter_width, size=len(diffold_data))
         ax.scatter(diffold_jitter, diffold_data, 
-                  color='#1a5f1a', s=50, alpha=0.9, edgecolors='black', linewidths=1.5, zorder=3)
+                  color=MODEL_COLORS['Diffold']['points'], 
+                  s=60, alpha=0.8, 
+                  edgecolors=MODEL_COLORS['Diffold']['edge'], 
+                  linewidths=1.8, zorder=3)
         
-        # Add RhoFold+ data points (using dark colors for better visibility)
+        # Add RhoFold+ data points with unified colors
         rhofold_jitter = np.random.normal(1, jitter_width, size=len(rhofold_data))
         ax.scatter(rhofold_jitter, rhofold_data, 
-                  color='#8b0000', s=50, alpha=0.9, edgecolors='black', linewidths=1.5, zorder=3)
+                  color=MODEL_COLORS['Rhofold+(unrelaxed)']['points'], 
+                  s=60, alpha=0.8, 
+                  edgecolors=MODEL_COLORS['Rhofold+(unrelaxed)']['edge'], 
+                  linewidths=1.8, zorder=3)
         
         # Set labels and title
         ax.set_xticks([0, 1])
@@ -164,27 +179,19 @@ def create_individual_comparison_plots(df, save_path="plots"):
     metrics_info = {
         'rmsd': {
             'label': 'RMSD (Angstrom)', 
-            'better': 'lower',
-            'color_diffold': '#2ecc71',
-            'color_rhofold': '#e74c3c'
+            'better': 'lower'
         },
         'tm_score': {
             'label': 'TM-Score', 
-            'better': 'higher',
-            'color_diffold': '#3498db', 
-            'color_rhofold': '#f39c12'
+            'better': 'higher'
         },
         'lddt': {
             'label': 'lDDT Score', 
-            'better': 'higher',
-            'color_diffold': '#9b59b6',
-            'color_rhofold': '#1abc9c'
+            'better': 'higher'
         },
         'clash_score': {
             'label': 'Clash Score', 
-            'better': 'lower',
-            'color_diffold': '#e67e22',
-            'color_rhofold': '#34495e'
+            'better': 'lower'
         }
     }
     
@@ -195,7 +202,7 @@ def create_individual_comparison_plots(df, save_path="plots"):
         
         # Prepare data
         diffold_data = df[df['model'] == 'Diffold'][metric].dropna()
-        rhofold_data = df[df['model'] == 'RhoFold+'][metric].dropna()
+        rhofold_data = df[df['model'] == 'Rhofold+(unrelaxed)'][metric].dropna()
         
         # Create violin plot
         violin_parts = ax.violinplot(
@@ -207,11 +214,11 @@ def create_individual_comparison_plots(df, save_path="plots"):
             showextrema=False
         )
         
-        # Set colors
-        colors = [info['color_diffold'], info['color_rhofold']]
+        # Set colors using unified color scheme
+        colors = [MODEL_COLORS['Diffold']['violin'], MODEL_COLORS['Rhofold+(unrelaxed)']['violin']]
         for pc, color in zip(violin_parts['bodies'], colors):
             pc.set_facecolor(color)
-            pc.set_alpha(0.6)
+            pc.set_alpha(0.7)
             pc.set_edgecolor('black')
             pc.set_linewidth(2)
         
@@ -219,15 +226,21 @@ def create_individual_comparison_plots(df, save_path="plots"):
         np.random.seed(42)  # For reproducible jitter
         jitter_width = 0.08  # Reduced jitter width for better centering
         
-        # Add Diffold data points (using dark colors for better visibility)
+        # Add Diffold data points with unified colors
         diffold_jitter = np.random.normal(0, jitter_width, size=len(diffold_data))
         ax.scatter(diffold_jitter, diffold_data, 
-                  color='#1a5f1a', s=60, alpha=0.9, edgecolors='black', linewidths=1.5, zorder=3)
+                  color=MODEL_COLORS['Diffold']['points'], 
+                  s=80, alpha=0.8, 
+                  edgecolors=MODEL_COLORS['Diffold']['edge'], 
+                  linewidths=2, zorder=3)
         
-        # Add RhoFold+ data points (using dark colors for better visibility)
+        # Add RhoFold+ data points with unified colors
         rhofold_jitter = np.random.normal(1, jitter_width, size=len(rhofold_data))
         ax.scatter(rhofold_jitter, rhofold_data, 
-                  color='#8b0000', s=60, alpha=0.9, edgecolors='black', linewidths=1.5, zorder=3)
+                  color=MODEL_COLORS['Rhofold+(unrelaxed)']['points'], 
+                  s=80, alpha=0.8, 
+                  edgecolors=MODEL_COLORS['Rhofold+(unrelaxed)']['edge'], 
+                  linewidths=2, zorder=3)
         
         # Set labels
         ax.set_xticks([0, 1])
@@ -253,7 +266,7 @@ def generate_summary_statistics(df):
     """Generate comparison statistics summary"""
     
     print("\n" + "="*60)
-    print("           DIFFOLD vs RHOFOLD+ PERFORMANCE COMPARISON")
+    print("      DIFFOLD vs RHOFOLD+(UNRELAXED) PERFORMANCE COMPARISON")
     print("="*60)
     
     metrics = ['rmsd', 'tm_score', 'lddt', 'clash_score']
@@ -262,48 +275,79 @@ def generate_summary_statistics(df):
     
     for metric, name, direction in zip(metrics, metric_names, better_direction):
         diffold_values = df[df['model'] == 'Diffold'][metric].dropna()
-        rhofold_values = df[df['model'] == 'RhoFold+'][metric].dropna()
+        rhofold_values = df[df['model'] == 'Rhofold+(unrelaxed)'][metric].dropna()
         
         diffold_mean = diffold_values.mean()
         rhofold_mean = rhofold_values.mean()
         
         print(f"\n{name}:")
-        print(f"  Diffold    - Mean: {diffold_mean:.4f}, Median: {diffold_values.median():.4f}")
-        print(f"  RhoFold+   - Mean: {rhofold_mean:.4f}, Median: {rhofold_values.median():.4f}")
+        print(f"  Diffold               - Mean: {diffold_mean:.4f}, Median: {diffold_values.median():.4f}")
+        print(f"  Rhofold+(unrelaxed)   - Mean: {rhofold_mean:.4f}, Median: {rhofold_values.median():.4f}")
         
         if direction == 'lower':
             improvement = ((diffold_mean - rhofold_mean) / diffold_mean) * 100
-            winner = "RhoFold+" if rhofold_mean < diffold_mean else "Diffold"
+            winner = "Rhofold+(unrelaxed)" if rhofold_mean < diffold_mean else "Diffold"
         else:
             improvement = ((rhofold_mean - diffold_mean) / diffold_mean) * 100
-            winner = "RhoFold+" if rhofold_mean > diffold_mean else "Diffold"
+            winner = "Rhofold+(unrelaxed)" if rhofold_mean > diffold_mean else "Diffold"
         
         print(f"  Winner: {winner}")
         print(f"  Improvement: {abs(improvement):.2f}%")
 
 def main():
     """Main function"""
-    print("Loading data...")
-    df, diffold_df, rhofold_df = load_and_prepare_data()
+    parser = argparse.ArgumentParser(
+        description='Compare Diffold and RhoFold+ performance on CASP15 dataset'
+    )
+    parser.add_argument(
+        '--diffold-path',
+        type=str,
+        required=True,
+        help='Path to Diffold results CSV file'
+    )
+    parser.add_argument(
+        '--rhofold-path',
+        type=str,
+        required=True,
+        help='Path to RhoFold results CSV file'
+    )
+    parser.add_argument(
+        '--output-dir',
+        type=str,
+        default='plots',
+        help='Directory to save output plots (default: plots)'
+    )
+    
+    args = parser.parse_args()
+    
+    print("="*70)
+    print("  DIFFOLD vs RHOFOLD+ PERFORMANCE COMPARISON")
+    print("="*70)
+    print(f"\nDiffold data: {args.diffold_path}")
+    print(f"RhoFold data: {args.rhofold_path}")
+    print(f"Output directory: {args.output_dir}")
+    print("\nLoading data...")
+    
+    df, diffold_df, rhofold_df = load_and_prepare_data(args.diffold_path, args.rhofold_path)
     
     print("\nGenerating comparison visualizations...")
     
     print("1. Creating comprehensive comparison violin plots...")
-    create_comparison_violin_plots(df)
+    create_comparison_violin_plots(df, save_path=args.output_dir)
     
     print("2. Creating individual metric comparison plots...")
-    create_individual_comparison_plots(df)
+    create_individual_comparison_plots(df, save_path=args.output_dir)
     
     print("3. Generating statistical summary...")
     generate_summary_statistics(df)
     
     print("\n✅ Comparison analysis completed!")
-    print("📁 Generated image files:")
-    print("   • plots/model_comparison_violin_plots.png - Comprehensive comparison")
-    print("   • plots/rmsd_comparison.png - RMSD comparison")
-    print("   • plots/tm_score_comparison.png - TM-Score comparison")
-    print("   • plots/lddt_comparison.png - lDDT comparison")
-    print("   • plots/clash_score_comparison.png - Clash Score comparison")
+    print(f"📁 Generated image files in '{args.output_dir}/':")
+    print("   • model_comparison_violin_plots.png - Comprehensive comparison")
+    print("   • rmsd_comparison.png - RMSD comparison")
+    print("   • tm_score_comparison.png - TM-Score comparison")
+    print("   • lddt_comparison.png - lDDT comparison")
+    print("   • clash_score_comparison.png - Clash Score comparison")
 
 if __name__ == "__main__":
     main()
