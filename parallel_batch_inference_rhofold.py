@@ -181,6 +181,7 @@ def run_parallel_inference(args):
             "--max_sequence_length", str(args.max_sequence_length),
             "--num_workers", str(args.num_workers),
             "--log_level", args.log_level,
+            "--usalign_path", args.usalign_path,  # US-align路径
         ]
         
         # 添加可选参数
@@ -424,6 +425,10 @@ def main():
     # Amber relaxation参数
     parser.add_argument("--relax_steps", type=int, default=None,
                        help="Amber relaxation步数（默认: None，不进行relaxation）")
+    
+    # 指标计算参数
+    parser.add_argument("--usalign_path", default="./USalign/USalign",
+                       help="US-align可执行文件路径 (用于计算权威指标)")
     
     # 其他参数
     parser.add_argument("--log_level", default="INFO",

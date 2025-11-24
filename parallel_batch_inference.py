@@ -122,6 +122,7 @@ def run_parallel_inference(args):
             "--num_sampling", str(args.num_sampling),
             "--selection_strategy", args.selection_strategy,
             "--log_level", args.log_level,
+            "--usalign_path", args.usalign_path,  # US-align路径
         ]
         
         # 添加可选参数
@@ -356,6 +357,10 @@ def main():
     parser.add_argument("--selection_strategy", default="rmsd",
                        choices=['rmsd', 'tm_score', 'lddt', 'clash_score', 'composite'])
     parser.add_argument("--save_all_samples", action="store_true", default=False)
+    
+    # 指标计算参数
+    parser.add_argument("--usalign_path", default="./USalign/USalign",
+                       help="US-align可执行文件路径 (用于计算权威指标)")
     
     # 其他参数
     parser.add_argument("--log_level", default="INFO")

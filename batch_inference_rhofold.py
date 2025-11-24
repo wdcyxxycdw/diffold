@@ -24,15 +24,111 @@ from rhofold.config import rhofold_config
 from rhofold.utils import get_device, timing
 from rhofold.utils.alphabet import get_features
 
-# 导入Diffold数据加载器和指标计算
+# 导入Diffold数据加载器
 from diffold.dataloader import create_data_loaders
-from diffold.metrics import RNAEvaluationMetrics
 
 # 导入PDB转换功能
 from diffold.rhofold_output import rhofold_coords_to_pdb, validate_rhofold_output, extract_rhofold_features
 
 # 导入Amber relaxation
 from rhofold.relax.relax import AmberRelaxation
+
+# 导入US-align wrapper用于权威指标计算
+import subprocess
+import re
+
+# ========== US-align Wrapper for Metrics Calculation ==========
+
+class USalignWrapper:
+    """US-align包装器 - 使用权威工具计算 RMSD, TM-score, GDT-TS"""
+    
+    def __init__(self, usalign_path: str = "./USalign/USalign"):
+        self.usalign_path = usalign_path
+        
+        # 检查 US-align 是否存在
+        if not Path(usalign_path).exists():
+            raise FileNotFoundError(
+                f"US-align 未找到: {usalign_path}\n"
+                f"请先编译 US-align:\n"
+                f"  cd USalign\n"
+                f"  g++ -static -O3 -ffast-math -o USalign USalign.cpp"
+            )
+    
+    def calculate_metrics(self, pred_pdb: str, native_pdb: str) -> Dict:
+        """
+        使用 US-align 计算 RMSD, TM-score, GDT-TS
+        
+        返回格式：
+        {
+            'rmsd': float,
+            'tm_score': float,
+            'gdt_ts': float,
+            'aligned_length': int,
+            'seq_identity': float,
+            'raw_output': str
+        }
+        """
+        try:
+            # 运行 US-align
+            cmd = [
+                self.usalign_path,
+                pred_pdb,
+                native_pdb,
+                "-mol", "RNA",  # RNA 模式
+                "-ter", "0"     # 不按 TER 记录分割链
+            ]
+            
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            
+            if result.returncode != 0:
+                return {
+                    'error': f"US-align failed: {result.stderr}",
+                    'returncode': result.returncode
+                }
+            
+            output = result.stdout
+            
+            # 解析输出
+            metrics = {}
+            
+            # RMSD
+            rmsd_match = re.search(r'RMSD=\s*([\d.]+)', output)
+            if rmsd_match:
+                metrics['rmsd'] = float(rmsd_match.group(1))
+            
+            # TM-score (使用第一个，通常是按第一个结构归一化的)
+            tm_matches = re.findall(r'TM-score=\s*([\d.]+)', output)
+            if tm_matches:
+                metrics['tm_score'] = float(tm_matches[0])
+            
+            # GDT-TS
+            gdt_match = re.search(r'GDT-TS-score=\s*([\d.]+)', output)
+            if gdt_match:
+                metrics['gdt_ts'] = float(gdt_match.group(1))
+            
+            # Aligned length
+            len_match = re.search(r'Aligned length=\s*(\d+)', output)
+            if len_match:
+                metrics['aligned_length'] = int(len_match.group(1))
+            
+            # Sequence identity
+            seqid_match = re.search(r'Seq_ID.*?=\s*([\d.]+)', output)
+            if seqid_match:
+                metrics['seq_identity'] = float(seqid_match.group(1))
+            
+            metrics['raw_output'] = output
+            
+            return metrics
+            
+        except subprocess.TimeoutExpired:
+            return {'error': 'US-align timeout (>30s)'}
+        except Exception as e:
+            return {'error': f'Exception: {str(e)}'}
 
 # RhoFold是确定性模型，不需要采样相关的函数
 
@@ -189,7 +285,7 @@ def get_msa_or_fasta(sequence: str, sample_name: str, config: argparse.Namespace
 def compute_metrics_for_sample(model: RhoFold, 
                              batch: Dict[str, torch.Tensor], 
                              sample_name: str,
-                             metrics_calculator: RNAEvaluationMetrics,
+                             usalign_wrapper: USalignWrapper,
                              output_dir: str,
                              config: argparse.Namespace,
                              logger: logging.Logger) -> Dict[str, Any]:
@@ -307,35 +403,10 @@ def compute_metrics_for_sample(model: RhoFold,
             else:
                 predicted_coords_flat = predicted_coords
             
-            # 确保坐标维度匹配
-            target_coords_flat = target_coords.view(-1, 3)
-            min_atoms = min(predicted_coords_flat.shape[0], target_coords_flat.shape[0])
-            predicted_coords_eval = predicted_coords_flat[:min_atoms]
-            target_coords_eval = target_coords_flat[:min_atoms]
-            
-            # 计算指标
-            temp_metrics_calculator = RNAEvaluationMetrics()
-            temp_metrics_calculator.update(
-                loss=0.0,
-                batch_size=1,
-                predicted_coords=predicted_coords_eval.unsqueeze(0),  # 添加batch维度
-                target_coords=target_coords_eval.unsqueeze(0),
-                confidence_scores=confidence if confidence is not None else None
-            )
-            
-            sample_metrics = temp_metrics_calculator.compute_metrics()
-            current_rmsd = sample_metrics.get('avg_rmsd', float('inf'))
-            
-            # 获取详细指标
+            # 指标将在保存PDB后使用US-align计算
+            current_rmsd = float('inf')  # 临时占位
+            sample_metrics = {}
             detailed_metrics = {}
-            if hasattr(temp_metrics_calculator, 'rmsd_values') and temp_metrics_calculator.rmsd_values:
-                detailed_metrics['rmsd_values'] = temp_metrics_calculator.rmsd_values
-            if hasattr(temp_metrics_calculator, 'tm_scores') and temp_metrics_calculator.tm_scores:
-                detailed_metrics['tm_scores'] = temp_metrics_calculator.tm_scores
-            if hasattr(temp_metrics_calculator, 'lddt_scores') and temp_metrics_calculator.lddt_scores:
-                detailed_metrics['lddt_scores'] = temp_metrics_calculator.lddt_scores
-            if hasattr(temp_metrics_calculator, 'confidence_scores') and temp_metrics_calculator.confidence_scores:
-                detailed_metrics['confidence_scores'] = temp_metrics_calculator.confidence_scores
             
         except Exception as e:
             logger.error(f"样本 {sample_name} RhoFold推理失败: {e}")
@@ -387,6 +458,34 @@ def compute_metrics_for_sample(model: RhoFold,
                 except Exception as e:
                     logger.warning(f"样本 {sample_name}: Amber优化失败: {e}")
                     logger.info(f"样本 {sample_name}: 继续使用unrelaxed模型")
+        
+        # 使用US-align计算指标
+        native_pdb_path = Path(config.data_dir) / "pdb" / f"{sample_name}.pdb"
+        if success and native_pdb_path.exists():
+            logger.debug(f"样本 {sample_name}: 使用US-align计算指标")
+            # 使用最终的PDB（relaxed如果可用，否则unrelaxed）
+            final_pdb = relaxed_pdb_path if relaxed_pdb_path else unrelaxed_pdb_path
+            
+            usalign_metrics = usalign_wrapper.calculate_metrics(
+                str(final_pdb),
+                str(native_pdb_path)
+            )
+            
+            if 'error' not in usalign_metrics:
+                current_rmsd = usalign_metrics.get('rmsd', float('inf'))
+                sample_metrics = {
+                    'avg_rmsd': usalign_metrics.get('rmsd'),
+                    'avg_tm_score': usalign_metrics.get('tm_score'),
+                    'gdt_ts': usalign_metrics.get('gdt_ts'),
+                    'aligned_length': usalign_metrics.get('aligned_length'),
+                }
+                logger.debug(f"样本 {sample_name}: US-align指标: RMSD={current_rmsd:.4f}, TM={sample_metrics.get('avg_tm_score', 0):.4f}")
+            else:
+                logger.warning(f"样本 {sample_name}: US-align失败: {usalign_metrics['error']}")
+                sample_metrics = {}
+        elif not native_pdb_path.exists():
+            logger.warning(f"样本 {sample_name}: 真实PDB不存在: {native_pdb_path}")
+            sample_metrics = {}
         
         # 准备返回结果
         result_dict = {
@@ -559,6 +658,10 @@ def main():
                        help="Number of steps for Amber relaxation (default: None, no relaxation). "
                             "If set to a positive value, will perform structure refinement using Amber.")
     
+    # US-align参数
+    parser.add_argument("--usalign_path", default="./USalign/USalign",
+                       help="US-align可执行文件路径 (用于计算权威指标)")
+    
     args = parser.parse_args()
     
     # 设置设备
@@ -589,8 +692,9 @@ def main():
         # 加载验证数据
         valid_loader, sample_names = load_validation_data(args, logger)
         
-        # 创建指标计算器
-        metrics_calculator = RNAEvaluationMetrics()
+        # 创建US-align包装器用于指标计算
+        usalign_wrapper = USalignWrapper(usalign_path=args.usalign_path)
+        logger.info(f"✅ US-align已就绪: {args.usalign_path}")
         
         # 批量处理
         results = []
@@ -613,7 +717,7 @@ def main():
                 model=model,
                 batch=batch,
                 sample_name=sample_name,
-                metrics_calculator=metrics_calculator,
+                usalign_wrapper=usalign_wrapper,
                 output_dir=args.output_dir,
                 config=args,
                 logger=logger

@@ -20,14 +20,110 @@ from tqdm import tqdm
 # 导入Diffold相关模块
 from diffold.diffold import Diffold
 from diffold.dataloader import create_data_loaders
-from diffold.metrics import RNAEvaluationMetrics
 from rhofold.utils import get_device, timing
 
 # 导入PDB转换功能
 from diffold.output import diffold_coords_to_pdb, validate_diffold_output
 
+# 导入US-align wrapper用于权威指标计算
+import subprocess
+import re
+
 # 采样结果筛选函数类型定义
 SampleSelectionFunc = Callable[[List[Dict[str, Any]]], int]
+
+# ========== US-align Wrapper for Metrics Calculation ==========
+
+class USalignWrapper:
+    """US-align包装器 - 使用权威工具计算 RMSD, TM-score, GDT-TS"""
+    
+    def __init__(self, usalign_path: str = "./USalign/USalign"):
+        self.usalign_path = usalign_path
+        
+        # 检查 US-align 是否存在
+        if not Path(usalign_path).exists():
+            raise FileNotFoundError(
+                f"US-align 未找到: {usalign_path}\n"
+                f"请先编译 US-align:\n"
+                f"  cd USalign\n"
+                f"  g++ -static -O3 -ffast-math -o USalign USalign.cpp"
+            )
+    
+    def calculate_metrics(self, pred_pdb: str, native_pdb: str) -> Dict:
+        """
+        使用 US-align 计算 RMSD, TM-score, GDT-TS
+        
+        返回格式：
+        {
+            'rmsd': float,
+            'tm_score': float,
+            'gdt_ts': float,
+            'aligned_length': int,
+            'seq_identity': float,
+            'raw_output': str
+        }
+        """
+        try:
+            # 运行 US-align
+            cmd = [
+                self.usalign_path,
+                pred_pdb,
+                native_pdb,
+                "-mol", "RNA",  # RNA 模式
+                "-ter", "0"     # 不按 TER 记录分割链
+            ]
+            
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            
+            if result.returncode != 0:
+                return {
+                    'error': f"US-align failed: {result.stderr}",
+                    'returncode': result.returncode
+                }
+            
+            output = result.stdout
+            
+            # 解析输出
+            metrics = {}
+            
+            # RMSD
+            rmsd_match = re.search(r'RMSD=\s*([\d.]+)', output)
+            if rmsd_match:
+                metrics['rmsd'] = float(rmsd_match.group(1))
+            
+            # TM-score (使用第一个，通常是按第一个结构归一化的)
+            tm_matches = re.findall(r'TM-score=\s*([\d.]+)', output)
+            if tm_matches:
+                metrics['tm_score'] = float(tm_matches[0])
+            
+            # GDT-TS
+            gdt_match = re.search(r'GDT-TS-score=\s*([\d.]+)', output)
+            if gdt_match:
+                metrics['gdt_ts'] = float(gdt_match.group(1))
+            
+            # Aligned length
+            len_match = re.search(r'Aligned length=\s*(\d+)', output)
+            if len_match:
+                metrics['aligned_length'] = int(len_match.group(1))
+            
+            # Sequence identity
+            seqid_match = re.search(r'Seq_ID.*?=\s*([\d.]+)', output)
+            if seqid_match:
+                metrics['seq_identity'] = float(seqid_match.group(1))
+            
+            metrics['raw_output'] = output
+            
+            return metrics
+            
+        except subprocess.TimeoutExpired:
+            return {'error': 'US-align timeout (>30s)'}
+        except Exception as e:
+            return {'error': f'Exception: {str(e)}'}
 
 # ========== 采样结果筛选策略函数 ==========
 
@@ -310,7 +406,8 @@ def load_validation_data(config: argparse.Namespace, logger: logging.Logger):
 def compute_metrics_for_sample(model: Diffold, 
                              batch: Dict[str, torch.Tensor], 
                              sample_name: str,
-                             metrics_calculator: RNAEvaluationMetrics,
+                             usalign_wrapper: USalignWrapper,
+                             data_dir: str,
                              output_dir: str,
                              num_sampling: int,
                              save_all_samples: bool,
@@ -371,39 +468,13 @@ def compute_metrics_for_sample(model: Diffold,
                 logger.warning(f"样本 {sample_name} 采样 {sample_idx+1}: 未获取到预测坐标")
                 continue
             
-            # 计算当前采样的指标
-            temp_metrics_calculator = RNAEvaluationMetrics()
-            temp_metrics_calculator.update(
-                loss=0.0,
-                batch_size=1,
-                predicted_coords=predicted_coords,
-                target_coords=target_coords
-            )
-            
-            sample_metrics = temp_metrics_calculator.compute_metrics()
-            current_rmsd = sample_metrics.get('avg_rmsd', float('inf'))
-            
-            # 保存采样结果
+            # 暂存采样结果（稍后计算指标）
             sample_result = {
                 'sample_idx': sample_idx,
                 'predicted_coords': predicted_coords,
                 'atom_mask': atom_mask,
-                'metrics': sample_metrics,
-                'rmsd': current_rmsd
+                'rmsd': float('inf')  # 临时占位，后续计算
             }
-            
-            # 获取详细指标
-            detailed_metrics = {}
-            if hasattr(temp_metrics_calculator, 'rmsd_values') and temp_metrics_calculator.rmsd_values:
-                detailed_metrics['rmsd_values'] = temp_metrics_calculator.rmsd_values
-            if hasattr(temp_metrics_calculator, 'tm_scores') and temp_metrics_calculator.tm_scores:
-                detailed_metrics['tm_scores'] = temp_metrics_calculator.tm_scores
-            if hasattr(temp_metrics_calculator, 'lddt_scores') and temp_metrics_calculator.lddt_scores:
-                detailed_metrics['lddt_scores'] = temp_metrics_calculator.lddt_scores
-            if hasattr(temp_metrics_calculator, 'clash_scores') and temp_metrics_calculator.clash_scores:
-                detailed_metrics['clash_scores'] = temp_metrics_calculator.clash_scores
-            
-            sample_result['detailed_metrics'] = detailed_metrics
             all_samples.append(sample_result)
         
         if not all_samples:
@@ -413,6 +484,73 @@ def compute_metrics_for_sample(model: Diffold,
                 'status': 'failed',
                 'error': 'all_sampling_failed'
             }
+        
+        # 创建PDB输出目录
+        pdb_output_dir = Path(output_dir) / "pdb_files"
+        pdb_output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 获取序列 - 优先从batch中获取，确保与当前样本匹配
+        batch_sample_name = batch.get('names', [sample_name])[0] if batch.get('names') else sample_name
+        
+        # 验证样本名称是否匹配
+        if batch_sample_name != sample_name:
+            logger.warning(f"样本名称不匹配: batch中为 {batch_sample_name}, 期望为 {sample_name}")
+            sample_name = batch_sample_name
+        
+        sequence = sequences[0] if sequences else ""
+        
+        # 如果序列为空，尝试从序列文件中读取
+        if not sequence:
+            logger.warning(f"样本 {sample_name}: batch中序列为空，尝试从文件读取")
+        
+        # 先保存所有采样的临时PDB文件，并用US-align计算指标
+        temp_pdb_dir = Path(output_dir) / "temp_pdbs"
+        temp_pdb_dir.mkdir(parents=True, exist_ok=True)
+        
+        native_pdb_path = Path(data_dir) / "pdb" / f"{sample_name}.pdb"
+        
+        logger.debug(f"样本 {sample_name}: 为{len(all_samples)}个采样计算指标")
+        
+        for i, sample_result in enumerate(all_samples):
+            # 保存临时PDB
+            temp_pdb_path = temp_pdb_dir / f"{sample_name}_sample_{i}.pdb"
+            try:
+                diffold_coords_to_pdb(
+                    predicted_coords=sample_result['predicted_coords'],
+                    sequence=sequence,
+                    output_path=str(temp_pdb_path),
+                    atom_mask=sample_result['atom_mask'],
+                    logger_instance=logger
+                )
+                
+                # 使用US-align计算指标
+                if native_pdb_path.exists():
+                    usalign_metrics = usalign_wrapper.calculate_metrics(
+                        str(temp_pdb_path), 
+                        str(native_pdb_path)
+                    )
+                    
+                    if 'error' not in usalign_metrics:
+                        sample_result['rmsd'] = usalign_metrics.get('rmsd', float('inf'))
+                        sample_result['metrics'] = {
+                            'avg_rmsd': usalign_metrics.get('rmsd'),
+                            'avg_tm_score': usalign_metrics.get('tm_score'),
+                            'gdt_ts': usalign_metrics.get('gdt_ts'),
+                            'aligned_length': usalign_metrics.get('aligned_length'),
+                        }
+                    else:
+                        logger.warning(f"样本 {sample_name} 采样 {i}: US-align失败: {usalign_metrics['error']}")
+                        sample_result['rmsd'] = float('inf')
+                        sample_result['metrics'] = {}
+                else:
+                    logger.warning(f"样本 {sample_name}: 真实PDB不存在: {native_pdb_path}")
+                    sample_result['rmsd'] = float('inf')
+                    sample_result['metrics'] = {}
+                    
+            except Exception as e:
+                logger.warning(f"样本 {sample_name} 采样 {i}: PDB保存或指标计算失败: {e}")
+                sample_result['rmsd'] = float('inf')
+                sample_result['metrics'] = {}
         
         # 使用筛选函数选择最佳采样
         try:
@@ -429,29 +567,8 @@ def compute_metrics_for_sample(model: Diffold,
             best_sample = all_samples[best_sample_idx]
             best_rmsd = best_sample['rmsd']
         
-        # 保存PDB文件
+        # 保存最终的PDB文件
         pdb_file_paths = []
-        
-        # 创建PDB输出目录
-        pdb_output_dir = Path(output_dir) / "pdb_files"
-        pdb_output_dir.mkdir(parents=True, exist_ok=True)
-        
-        # 获取序列 - 优先从batch中获取，确保与当前样本匹配
-        # batch['names'] 包含实际的样本名称列表
-        batch_sample_name = batch.get('names', [sample_name])[0] if batch.get('names') else sample_name
-        
-        # 验证样本名称是否匹配
-        if batch_sample_name != sample_name:
-            logger.warning(f"样本名称不匹配: batch中为 {batch_sample_name}, 期望为 {sample_name}")
-            # 使用batch中的实际样本名称
-            sample_name = batch_sample_name
-        
-        sequence = sequences[0] if sequences else ""
-        
-        # 如果序列为空，尝试从序列文件中读取
-        if not sequence:
-            logger.warning(f"样本 {sample_name}: batch中序列为空，尝试从文件读取")
-            # 这里可以添加从文件读取序列的逻辑，但通常batch中应该有序列
         
         # 保存最佳采样的PDB文件
         best_pdb_path = pdb_output_dir / f"{sample_name}_best.pdb"
@@ -695,6 +812,8 @@ def main():
     parser.add_argument("--selection_strategy", choices=list(SELECTION_STRATEGIES.keys()), 
                        default="rmsd",
                        help="采样结果筛选策略: rmsd(默认), tm_score, lddt, clash_score, composite")
+    parser.add_argument("--usalign_path", default="./USalign/USalign",
+                       help="US-align可执行文件路径 (用于计算权威指标)")
     
     args = parser.parse_args()
     
@@ -747,8 +866,9 @@ def main():
         # 加载验证数据
         valid_loader, sample_names = load_validation_data(args, logger)
         
-        # 创建指标计算器
-        metrics_calculator = RNAEvaluationMetrics()
+        # 创建US-align包装器用于指标计算
+        usalign_wrapper = USalignWrapper(usalign_path=args.usalign_path)
+        logger.info(f"✅ US-align已就绪: {args.usalign_path}")
         
         # 批量处理
         results = []
@@ -782,7 +902,8 @@ def main():
                 model=model,
                 batch=batch,
                 sample_name=sample_name,
-                metrics_calculator=metrics_calculator,
+                usalign_wrapper=usalign_wrapper,
+                data_dir=args.data_dir,
                 output_dir=args.output_dir,
                 num_sampling=args.num_sampling,
                 save_all_samples=args.save_all_samples,

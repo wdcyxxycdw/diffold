@@ -25,3 +25,5 @@ RNAdata/
 fine_tuning_data/
 output_finetune/
 checkpoints_finetune/
+results/
+USalign/
