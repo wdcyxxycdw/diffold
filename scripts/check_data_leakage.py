@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-检查 benchmark_data 和 fine_tuning_data 之间是否有序列重复（数据泄露）
+增强版数据泄露检查工具
+功能：
+1. 检查完全重复的序列
+2. 检查子序列包含关系
+3. 检查高相似度序列
 """
 
 import os
 import glob
+import argparse
 from pathlib import Path
 from collections import defaultdict
+from difflib import SequenceMatcher
+import json
 
 
 def read_sequences_from_fasta(fasta_file):
@@ -46,161 +53,409 @@ def read_sequences_from_fasta(fasta_file):
     return sequences
 
 
-def load_sequences_from_directory(directory):
+def load_sequences_from_directory(directory, recursive=False):
     """从目录中加载所有FASTA文件的序列"""
-    seq_dict = {}  # sequence -> list of (file, header)
+    seq_list = []  # 保持顺序和完整信息
     file_count = 0
     
     # 查找所有FASTA文件
     fasta_patterns = ['*.fasta', '*.fa', '*.fna']
     fasta_files = []
-    for pattern in fasta_patterns:
-        fasta_files.extend(glob.glob(os.path.join(directory, pattern)))
+    
+    if recursive:
+        for pattern in fasta_patterns:
+            fasta_files.extend(glob.glob(os.path.join(directory, '**', pattern), recursive=True))
+    else:
+        for pattern in fasta_patterns:
+            fasta_files.extend(glob.glob(os.path.join(directory, pattern)))
     
     print(f"在 {directory} 中找到 {len(fasta_files)} 个序列文件")
     
     for fasta_file in fasta_files:
         file_count += 1
-        filename = os.path.basename(fasta_file)
+        filename = os.path.relpath(fasta_file, directory)
         sequences = read_sequences_from_fasta(fasta_file)
         
         for seq_info in sequences:
-            seq = seq_info['sequence']
-            if seq not in seq_dict:
-                seq_dict[seq] = []
-            seq_dict[seq].append({
+            seq_list.append({
                 'file': filename,
                 'header': seq_info['header'],
-                'length': len(seq)
+                'sequence': seq_info['sequence'],
+                'length': len(seq_info['sequence'])
             })
     
-    print(f"  共加载 {len(seq_dict)} 个唯一序列")
-    return seq_dict
+    print(f"  共加载 {len(seq_list)} 个序列")
+    return seq_list
 
 
-def check_overlap(benchmark_seqs, training_seqs):
-    """检查两个序列集合之间的重叠"""
-    overlaps = []
+def check_exact_duplicates(target_seqs, training_seqs):
+    """检查1: 完全重复的序列"""
+    print("\n" + "=" * 80)
+    print("检查 1: 完全重复的序列")
+    print("=" * 80)
     
-    for seq, benchmark_sources in benchmark_seqs.items():
-        if seq in training_seqs:
-            training_sources = training_seqs[seq]
-            overlaps.append({
-                'sequence': seq,
-                'length': len(seq),
-                'benchmark_sources': benchmark_sources,
-                'training_sources': training_sources
+    # 建立训练集序列索引
+    training_seq_dict = defaultdict(list)
+    for item in training_seqs:
+        training_seq_dict[item['sequence']].append(item)
+    
+    duplicates = []
+    for target in target_seqs:
+        if target['sequence'] in training_seq_dict:
+            duplicates.append({
+                'target': target,
+                'training_matches': training_seq_dict[target['sequence']]
             })
     
-    return overlaps
+    if duplicates:
+        print(f"⚠️  发现 {len(duplicates)} 个完全重复的序列！")
+        for i, dup in enumerate(duplicates, 1):
+            print(f"\n重复 #{i}:")
+            print(f"  目标数据: {dup['target']['file']} - {dup['target']['header']}")
+            print(f"  序列长度: {dup['target']['length']}")
+            print(f"  序列: {dup['target']['sequence'][:80]}{'...' if len(dup['target']['sequence']) > 80 else ''}")
+            print(f"  在训练集中的匹配:")
+            for match in dup['training_matches']:
+                print(f"    - {match['file']} - {match['header']}")
+    else:
+        print("✓ 未发现完全重复的序列")
+    
+    return duplicates
+
+
+def check_substring_containment(target_seqs, training_seqs, min_length=10):
+    """检查2: 子序列包含关系"""
+    print("\n" + "=" * 80)
+    print("检查 2: 子序列包含关系")
+    print("=" * 80)
+    print(f"(最小子序列长度: {min_length})")
+    
+    containments = []
+    
+    # 检查目标序列是否是训练集序列的子序列
+    for i, target in enumerate(target_seqs):
+        if len(target['sequence']) < min_length:
+            continue
+        
+        for training in training_seqs:
+            # 检查 target 是否是 training 的子序列
+            if target['sequence'] in training['sequence'] and target['sequence'] != training['sequence']:
+                containments.append({
+                    'type': 'target_in_training',
+                    'target': target,
+                    'training': training,
+                    'target_length': len(target['sequence']),
+                    'training_length': len(training['sequence']),
+                    'coverage': len(target['sequence']) / len(training['sequence'])
+                })
+            # 检查 training 是否是 target 的子序列
+            elif training['sequence'] in target['sequence'] and target['sequence'] != training['sequence']:
+                if len(training['sequence']) >= min_length:
+                    containments.append({
+                        'type': 'training_in_target',
+                        'target': target,
+                        'training': training,
+                        'target_length': len(target['sequence']),
+                        'training_length': len(training['sequence']),
+                        'coverage': len(training['sequence']) / len(target['sequence'])
+                    })
+        
+        # 进度提示
+        if (i + 1) % 10 == 0:
+            print(f"  已检查 {i + 1}/{len(target_seqs)} 个目标序列...", end='\r')
+    
+    print(" " * 80, end='\r')  # 清除进度提示
+    
+    if containments:
+        print(f"⚠️  发现 {len(containments)} 个子序列包含关系！")
+        
+        # 按类型分组
+        target_in_training = [c for c in containments if c['type'] == 'target_in_training']
+        training_in_target = [c for c in containments if c['type'] == 'training_in_target']
+        
+        if target_in_training:
+            print(f"\n目标序列是训练集序列的子序列: {len(target_in_training)} 个")
+            for i, cont in enumerate(target_in_training[:5], 1):  # 只显示前5个
+                print(f"\n  #{i}:")
+                print(f"    目标: {cont['target']['file']} (长度: {cont['target_length']})")
+                print(f"    包含在训练集: {cont['training']['file']} (长度: {cont['training_length']})")
+                print(f"    覆盖率: {cont['coverage']*100:.1f}%")
+            if len(target_in_training) > 5:
+                print(f"\n    ... 还有 {len(target_in_training) - 5} 个")
+        
+        if training_in_target:
+            print(f"\n训练集序列是目标序列的子序列: {len(training_in_target)} 个")
+            for i, cont in enumerate(training_in_target[:5], 1):
+                print(f"\n  #{i}:")
+                print(f"    目标: {cont['target']['file']} (长度: {cont['target_length']})")
+                print(f"    包含训练集: {cont['training']['file']} (长度: {cont['training_length']})")
+                print(f"    覆盖率: {cont['coverage']*100:.1f}%")
+            if len(training_in_target) > 5:
+                print(f"\n    ... 还有 {len(training_in_target) - 5} 个")
+    else:
+        print("✓ 未发现子序列包含关系")
+    
+    return containments
+
+
+def calculate_sequence_similarity(seq1, seq2):
+    """计算两个序列的相似度（使用 SequenceMatcher）"""
+    return SequenceMatcher(None, seq1, seq2).ratio()
+
+
+def calculate_kmer_similarity(seq1, seq2, k=3):
+    """计算基于 k-mer 的序列相似度（Jaccard 相似度）"""
+    def get_kmers(seq, k):
+        return set(seq[i:i+k] for i in range(len(seq) - k + 1))
+    
+    kmers1 = get_kmers(seq1, k)
+    kmers2 = get_kmers(seq2, k)
+    
+    if not kmers1 or not kmers2:
+        return 0.0
+    
+    intersection = len(kmers1 & kmers2)
+    union = len(kmers1 | kmers2)
+    
+    return intersection / union if union > 0 else 0.0
+
+
+def check_high_similarity(target_seqs, training_seqs, similarity_threshold=0.8, method='sequence_matcher'):
+    """检查3: 高相似度序列"""
+    print("\n" + "=" * 80)
+    print("检查 3: 高相似度序列")
+    print("=" * 80)
+    print(f"(相似度阈值: {similarity_threshold}, 方法: {method})")
+    
+    high_similarities = []
+    total_comparisons = len(target_seqs) * len(training_seqs)
+    comparison_count = 0
+    
+    for i, target in enumerate(target_seqs):
+        for training in training_seqs:
+            comparison_count += 1
+            
+            # 跳过完全相同的序列（已在检查1中处理）
+            if target['sequence'] == training['sequence']:
+                continue
+            
+            # 计算相似度
+            if method == 'sequence_matcher':
+                similarity = calculate_sequence_similarity(target['sequence'], training['sequence'])
+            elif method == 'kmer':
+                similarity = calculate_kmer_similarity(target['sequence'], training['sequence'], k=3)
+            else:
+                similarity = calculate_sequence_similarity(target['sequence'], training['sequence'])
+            
+            if similarity >= similarity_threshold:
+                high_similarities.append({
+                    'target': target,
+                    'training': training,
+                    'similarity': similarity,
+                    'target_length': len(target['sequence']),
+                    'training_length': len(training['sequence'])
+                })
+            
+            # 进度提示
+            if comparison_count % 100 == 0:
+                progress = comparison_count / total_comparisons * 100
+                print(f"  已比较 {comparison_count}/{total_comparisons} ({progress:.1f}%)...", end='\r')
+    
+    print(" " * 80, end='\r')  # 清除进度提示
+    
+    if high_similarities:
+        # 按相似度排序
+        high_similarities.sort(key=lambda x: x['similarity'], reverse=True)
+        
+        print(f"⚠️  发现 {len(high_similarities)} 对高相似度序列！")
+        print(f"\n前 10 个最相似的序列对:")
+        
+        for i, sim in enumerate(high_similarities[:10], 1):
+            print(f"\n  #{i}:")
+            print(f"    相似度: {sim['similarity']*100:.2f}%")
+            print(f"    目标: {sim['target']['file']} - {sim['target']['header']}")
+            print(f"      长度: {sim['target_length']}")
+            print(f"      序列: {sim['target']['sequence'][:60]}{'...' if sim['target_length'] > 60 else ''}")
+            print(f"    训练集: {sim['training']['file']} - {sim['training']['header']}")
+            print(f"      长度: {sim['training_length']}")
+            print(f"      序列: {sim['training']['sequence'][:60]}{'...' if sim['training_length'] > 60 else ''}")
+        
+        if len(high_similarities) > 10:
+            print(f"\n    ... 还有 {len(high_similarities) - 10} 对")
+    else:
+        print("✓ 未发现高相似度序列")
+    
+    return high_similarities
+
+
+def save_results(results, output_file):
+    """保存检查结果到JSON文件"""
+    # 转换为可序列化的格式
+    serializable_results = {
+        'exact_duplicates': [
+            {
+                'target': dup['target'],
+                'training_matches': dup['training_matches']
+            }
+            for dup in results['exact_duplicates']
+        ],
+        'substrings': [
+            {
+                'type': cont['type'],
+                'target': cont['target'],
+                'training': cont['training'],
+                'coverage': cont['coverage']
+            }
+            for cont in results['substrings']
+        ],
+        'high_similarities': [
+            {
+                'target': sim['target'],
+                'training': sim['training'],
+                'similarity': sim['similarity']
+            }
+            for sim in results['high_similarities']
+        ]
+    }
+    
+    with open(output_file, 'w') as f:
+        json.dump(serializable_results, f, indent=2, ensure_ascii=False)
+    
+    print(f"\n详细结果已保存到: {output_file}")
 
 
 def main():
+    parser = argparse.ArgumentParser(
+        description="数据泄露检查工具 - 增强版",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+使用示例:
+
+1. 检查 CASP16 与训练集:
+   python check_data_leakage_enhanced.py \\
+       --target ./benchmark_data/casp16/sequences \\
+       --training ./fine_tuning_data/sequences
+
+2. 使用更严格的阈值:
+   python check_data_leakage_enhanced.py \\
+       --target ./benchmark_data/casp16/sequences \\
+       --training ./fine_tuning_data/sequences \\
+       --similarity-threshold 0.7 \\
+       --min-substring-length 15
+
+3. 使用 k-mer 相似度方法:
+   python check_data_leakage_enhanced.py \\
+       --target ./benchmark_data/casp16/sequences \\
+       --training ./fine_tuning_data/sequences \\
+       --similarity-method kmer
+        """
+    )
+    
+    parser.add_argument("--target", required=True,
+                       help="目标数据集目录（benchmark/test set）")
+    parser.add_argument("--training", required=True,
+                       help="训练数据集目录")
+    parser.add_argument("--similarity-threshold", type=float, default=0.8,
+                       help="高相似度阈值 (0.0-1.0，默认: 0.8)")
+    parser.add_argument("--min-substring-length", type=int, default=10,
+                       help="最小子序列长度 (默认: 10)")
+    parser.add_argument("--similarity-method", choices=['sequence_matcher', 'kmer'], 
+                       default='sequence_matcher',
+                       help="相似度计算方法 (默认: sequence_matcher)")
+    parser.add_argument("--output", default=None,
+                       help="保存详细结果的JSON文件路径")
+    parser.add_argument("--recursive", action="store_true",
+                       help="递归搜索子目录中的序列文件")
+    parser.add_argument("--skip-similarity", action="store_true",
+                       help="跳过相似度检查（大数据集时可节省时间）")
+    
+    args = parser.parse_args()
+    
     print("=" * 80)
-    print("数据泄露检查工具")
+    print("数据泄露检查工具 - 增强版")
+    print("=" * 80)
+    print(f"目标数据集: {args.target}")
+    print(f"训练数据集: {args.training}")
+    print(f"相似度阈值: {args.similarity_threshold}")
+    print(f"最小子序列长度: {args.min_substring_length}")
+    print(f"相似度方法: {args.similarity_method}")
     print("=" * 80)
     print()
-    
-    # 定义路径
-    benchmark_dir = "benchmark_data/casp15/sequences"
-    training_dir = "fine_tuning_data/sequences"
-    processed_dir = "processed_data/seq"
     
     # 检查目录是否存在
-    if not os.path.exists(benchmark_dir):
-        print(f"错误: benchmark目录不存在: {benchmark_dir}")
+    if not os.path.exists(args.target):
+        print(f"错误: 目标目录不存在: {args.target}")
         return 1
     
-    if not os.path.exists(training_dir):
-        print(f"错误: training目录不存在: {training_dir}")
+    if not os.path.exists(args.training):
+        print(f"错误: 训练目录不存在: {args.training}")
         return 1
     
-    if not os.path.exists(processed_dir):
-        print(f"错误: processed目录不存在: {processed_dir}")
-        return 1
-    
-    print("步骤 1: 加载 benchmark 数据集")
+    # 加载序列
+    print("步骤 1: 加载目标数据集")
     print("-" * 80)
-    benchmark_seqs = load_sequences_from_directory(benchmark_dir)
+    target_seqs = load_sequences_from_directory(args.target, recursive=args.recursive)
     print()
     
-    print("步骤 2: 加载 fine-tuning 数据集")
+    print("步骤 2: 加载训练数据集")
     print("-" * 80)
-    training_seqs = load_sequences_from_directory(training_dir)
+    training_seqs = load_sequences_from_directory(args.training, recursive=args.recursive)
     print()
     
-    print("步骤 3: 加载 processed 数据集")
-    print("-" * 80)
-    processed_seqs = load_sequences_from_directory(processed_dir)
-    print()
+    # 执行检查
+    results = {}
     
-    print("步骤 4: 检查与 fine-tuning 数据集的重叠")
-    print("-" * 80)
-    overlaps_training = check_overlap(benchmark_seqs, training_seqs)
+    # 检查1: 完全重复
+    results['exact_duplicates'] = check_exact_duplicates(target_seqs, training_seqs)
     
-    print("步骤 5: 检查与 processed 数据集的重叠")
-    print("-" * 80)
-    overlaps_processed = check_overlap(benchmark_seqs, processed_seqs)
+    # 检查2: 子序列包含
+    results['substrings'] = check_substring_containment(
+        target_seqs, 
+        training_seqs, 
+        min_length=args.min_substring_length
+    )
     
-    overlaps = overlaps_training + overlaps_processed
-    
-    if not overlaps_training and not overlaps_processed:
-        print("✓ 未发现数据泄露！")
-        print(f"  benchmark 数据集的 {len(benchmark_seqs)} 个序列均不在 fine-tuning 或 processed 数据集中")
+    # 检查3: 高相似度
+    if not args.skip_similarity:
+        results['high_similarities'] = check_high_similarity(
+            target_seqs, 
+            training_seqs,
+            similarity_threshold=args.similarity_threshold,
+            method=args.similarity_method
+        )
     else:
-        print(f"✗ 发现数据泄露！")
-        if overlaps_training:
-            print(f"  - Fine-tuning 数据集中有 {len(overlaps_training)} 个重复序列")
-        if overlaps_processed:
-            print(f"  - Processed 数据集中有 {len(overlaps_processed)} 个重复序列")
-        print()
-        
-        if overlaps_training:
-            print("与 Fine-tuning 数据集的重复:")
-            print("=" * 80)
-            for i, overlap in enumerate(overlaps_training, 1):
-                print(f"\n重复序列 #{i}:")
-                print(f"  序列长度: {overlap['length']} 个核苷酸")
-                print(f"  序列: {overlap['sequence'][:60]}{'...' if len(overlap['sequence']) > 60 else ''}")
-                print()
-                print("  在 benchmark 数据集中:")
-                for src in overlap['benchmark_sources']:
-                    print(f"    - {src['file']} (header: {src['header']})")
-                print()
-                print("  在 fine-tuning 数据集中:")
-                for src in overlap['training_sources']:
-                    print(f"    - {src['file']} (header: {src['header']})")
-                print("-" * 80)
-        
-        if overlaps_processed:
-            print("\n与 Processed 数据集的重复:")
-            print("=" * 80)
-            for i, overlap in enumerate(overlaps_processed, 1):
-                print(f"\n重复序列 #{i}:")
-                print(f"  序列长度: {overlap['length']} 个核苷酸")
-                print(f"  序列: {overlap['sequence'][:60]}{'...' if len(overlap['sequence']) > 60 else ''}")
-                print()
-                print("  在 benchmark 数据集中:")
-                for src in overlap['benchmark_sources']:
-                    print(f"    - {src['file']} (header: {src['header']})")
-                print()
-                print("  在 processed 数据集中:")
-                for src in overlap['training_sources']:
-                    print(f"    - {src['file']} (header: {src['header']})")
-                print("-" * 80)
+        print("\n⏩ 跳过相似度检查")
+        results['high_similarities'] = []
     
+    # 总结
+    print("\n" + "=" * 80)
+    print("检查完成 - 总结")
+    print("=" * 80)
+    print(f"目标数据集序列数: {len(target_seqs)}")
+    print(f"训练数据集序列数: {len(training_seqs)}")
     print()
-    print("=" * 80)
-    print("检查完成")
-    print("=" * 80)
-    print(f"Benchmark 数据集: {len(benchmark_seqs)} 个唯一序列")
-    print(f"Fine-tuning 数据集: {len(training_seqs)} 个唯一序列")
-    print(f"Processed 数据集: {len(processed_seqs)} 个唯一序列")
-    print(f"与 Fine-tuning 重复: {len(overlaps_training)} 个")
-    print(f"与 Processed 重复: {len(overlaps_processed)} 个")
+    print(f"完全重复: {len(results['exact_duplicates'])} 个")
+    print(f"子序列包含: {len(results['substrings'])} 个")
+    print(f"高相似度 (>={args.similarity_threshold}): {len(results['high_similarities'])} 对")
     print("=" * 80)
     
-    return 0 if (len(overlaps_training) == 0 and len(overlaps_processed) == 0) else 1
+    # 保存结果
+    if args.output:
+        save_results(results, args.output)
+    
+    # 判断是否存在泄露
+    has_leakage = (
+        len(results['exact_duplicates']) > 0 or 
+        len(results['substrings']) > 0 or 
+        len(results['high_similarities']) > 0
+    )
+    
+    if has_leakage:
+        print("\n⚠️  警告: 检测到潜在的数据泄露！")
+        return 1
+    else:
+        print("\n✓ 未检测到数据泄露")
+        return 0
 
 
 if __name__ == "__main__":
