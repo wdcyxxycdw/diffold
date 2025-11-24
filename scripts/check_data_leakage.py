@@ -220,12 +220,52 @@ def calculate_kmer_similarity(seq1, seq2, k=3):
     return intersection / union if union > 0 else 0.0
 
 
-def check_high_similarity(target_seqs, training_seqs, similarity_threshold=0.8, method='sequence_matcher'):
+def calculate_cdhit_similarity(seq1, seq2):
+    """
+    计算 CD-HIT 风格的序列相似度
+    
+    CD-HIT 相似度定义：
+    相似度 = 匹配的字符数 / min(len(seq1), len(seq2))
+    
+    使用简单的逐字符比较（不考虑gaps）
+    对于更精确的比对，可以使用 Biopython 的 pairwise2
+    """
+    if not seq1 or not seq2:
+        return 0.0
+    
+    # 计算匹配的字符数
+    min_len = min(len(seq1), len(seq2))
+    matches = sum(1 for i in range(min_len) if seq1[i] == seq2[i])
+    
+    # CD-HIT 相似度：匹配数 / 较短序列长度
+    return matches / min_len if min_len > 0 else 0.0
+
+
+def calculate_cdhit_similarity_aligned(seq1, seq2):
+    """
+    计算 CD-HIT 风格的序列相似度（带全局比对）
+    
+    使用 SequenceMatcher 找到最佳比对，然后计算相似度
+    相似度 = 匹配的字符数 / min(len(seq1), len(seq2))
+    """
+    if not seq1 or not seq2:
+        return 0.0
+    
+    # 使用 SequenceMatcher 获取匹配块
+    matcher = SequenceMatcher(None, seq1, seq2)
+    matches = sum(size for _, _, size in matcher.get_matching_blocks())
+    
+    # CD-HIT 相似度：基于较短序列
+    min_len = min(len(seq1), len(seq2))
+    return matches / min_len if min_len > 0 else 0.0
+
+
+def check_high_similarity(target_seqs, training_seqs, similarity_threshold=0.8, method='sequence_matcher', min_seq_length=0):
     """检查3: 高相似度序列"""
     print("\n" + "=" * 80)
     print("检查 3: 高相似度序列")
     print("=" * 80)
-    print(f"(相似度阈值: {similarity_threshold}, 方法: {method})")
+    print(f"(相似度阈值: {similarity_threshold}, 方法: {method}, 最小序列长度: {min_seq_length})")
     
     high_similarities = []
     total_comparisons = len(target_seqs) * len(training_seqs)
@@ -239,11 +279,20 @@ def check_high_similarity(target_seqs, training_seqs, similarity_threshold=0.8, 
             if target['sequence'] == training['sequence']:
                 continue
             
+            # 跳过过短的序列（避免 CD-HIT 方法的短序列问题）
+            if min_seq_length > 0:
+                if len(target['sequence']) < min_seq_length or len(training['sequence']) < min_seq_length:
+                    continue
+            
             # 计算相似度
             if method == 'sequence_matcher':
                 similarity = calculate_sequence_similarity(target['sequence'], training['sequence'])
             elif method == 'kmer':
                 similarity = calculate_kmer_similarity(target['sequence'], training['sequence'], k=3)
+            elif method == 'cdhit':
+                similarity = calculate_cdhit_similarity(target['sequence'], training['sequence'])
+            elif method == 'cdhit_aligned':
+                similarity = calculate_cdhit_similarity_aligned(target['sequence'], training['sequence'])
             else:
                 similarity = calculate_sequence_similarity(target['sequence'], training['sequence'])
             
@@ -348,6 +397,12 @@ def main():
        --target ./benchmark_data/casp16/sequences \\
        --training ./fine_tuning_data/sequences \\
        --similarity-method kmer
+
+4. 使用 CD-HIT 相似度方法:
+   python check_data_leakage_enhanced.py \\
+       --target ./benchmark_data/casp16/sequences \\
+       --training ./fine_tuning_data/sequences \\
+       --similarity-method cdhit_aligned
         """
     )
     
@@ -359,15 +414,18 @@ def main():
                        help="高相似度阈值 (0.0-1.0，默认: 0.8)")
     parser.add_argument("--min-substring-length", type=int, default=10,
                        help="最小子序列长度 (默认: 10)")
-    parser.add_argument("--similarity-method", choices=['sequence_matcher', 'kmer'], 
+    parser.add_argument("--similarity-method", 
+                       choices=['sequence_matcher', 'kmer', 'cdhit', 'cdhit_aligned'], 
                        default='sequence_matcher',
-                       help="相似度计算方法 (默认: sequence_matcher)")
+                       help="相似度计算方法: sequence_matcher (默认), kmer (Jaccard), cdhit (CD-HIT简单), cdhit_aligned (CD-HIT比对)")
     parser.add_argument("--output", default=None,
                        help="保存详细结果的JSON文件路径")
     parser.add_argument("--recursive", action="store_true",
                        help="递归搜索子目录中的序列文件")
     parser.add_argument("--skip-similarity", action="store_true",
                        help="跳过相似度检查（大数据集时可节省时间）")
+    parser.add_argument("--min-seq-length-similarity", type=int, default=0,
+                       help="相似度检查时的最小序列长度（推荐 RNA: 15-20, Protein: 30，默认: 0 表示不过滤）")
     
     args = parser.parse_args()
     
@@ -421,7 +479,8 @@ def main():
             target_seqs, 
             training_seqs,
             similarity_threshold=args.similarity_threshold,
-            method=args.similarity_method
+            method=args.similarity_method,
+            min_seq_length=args.min_seq_length_similarity
         )
     else:
         print("\n⏩ 跳过相似度检查")
