@@ -227,29 +227,36 @@ class RNAEvaluationMetrics:
                      target_coords: torch.Tensor,
                      cutoff_distances: List[float] = None,
                      inclusion_radius: float = None) -> torch.Tensor:
-        """计算RNA lDDT (local Distance Difference Test)
+        """计算RNA lDDT (local Distance Difference Test) - 标准实现
         
-        RNA lDDT是基于距离差异的本地结构质量指标，范围0-100，值越高越好
-        使用针对RNA调整的inclusion_radius和距离阈值
+        基于 Mariani et al. (2013) Bioinformatics 的标准算法
+        lDDT 是 per-residue 的局部距离保持度量，范围0-100，值越高越好
+        
+        标准算法：
+        1. 对每个原子，找到 inclusion_radius 范围内的所有邻居
+        2. 对每个邻居对，计算预测和真实结构中的距离
+        3. 检查距离差异是否在各个阈值内
+        4. 计算保持的距离对比例
+        5. 对所有原子求平均
         
         Args:
             pred_coords: [batch_size, n_atoms, 3] 预测坐标
             target_coords: [batch_size, n_atoms, 3] 目标坐标
-            cutoff_distances: 距离差异的阈值列表（默认RNA优化值）
-            inclusion_radius: 考虑的原子对距离半径（默认RNA优化值）
+            cutoff_distances: 距离差异的阈值列表（默认 [0.5, 1.0, 2.0, 4.0] Å）
+            inclusion_radius: 考虑的原子对距离半径（默认 15.0 Å）
             
         Returns:
-            lddt_score: [batch_size] 每个样本的RNA lDDT分数
+            lddt_score: [batch_size] 每个样本的RNA lDDT分数 (0-100)
         """
         batch_size, n_atoms, _ = pred_coords.shape
         device = pred_coords.device
         
-        # RNA专用的默认参数
+        # 使用标准 lDDT 参数
         if cutoff_distances is None:
-            cutoff_distances = [1.0, 2.0, 4.0, 8.0]  # RNA使用更大的阈值
+            cutoff_distances = [0.5, 1.0, 2.0, 4.0]  # 标准 lDDT 阈值
         
         if inclusion_radius is None:
-            inclusion_radius = 20.0  # RNA使用更大的inclusion radius
+            inclusion_radius = 15.0  # 标准 lDDT inclusion radius
         
         # 确保坐标形状匹配
         if pred_coords.shape != target_coords.shape:
@@ -258,45 +265,66 @@ class RNAEvaluationMetrics:
             target_coords = target_coords[:, :min_len]
             n_atoms = min_len
         
+        if n_atoms < 2:
+            logger.warning(f"RNA lDDT计算: 原子数太少 ({n_atoms})")
+            return torch.zeros(batch_size, device=device)
+        
         try:
             # 1. 计算所有原子对之间的距离
-            # pred_distances: [B, N, N]
+            # pred_distances: [B, N, N], target_distances: [B, N, N]
             pred_diff = pred_coords.unsqueeze(2) - pred_coords.unsqueeze(1)  # [B, N, N, 3]
-            pred_distances = torch.sqrt(torch.sum(pred_diff ** 2, dim=-1))  # [B, N, N]
+            pred_distances = torch.sqrt(torch.sum(pred_diff ** 2, dim=-1) + 1e-8)  # [B, N, N]
             
             target_diff = target_coords.unsqueeze(2) - target_coords.unsqueeze(1)  # [B, N, N, 3]
-            target_distances = torch.sqrt(torch.sum(target_diff ** 2, dim=-1))  # [B, N, N]
+            target_distances = torch.sqrt(torch.sum(target_diff ** 2, dim=-1) + 1e-8)  # [B, N, N]
             
-            # 2. 创建mask：只考虑inclusion_radius范围内的原子对
-            inclusion_mask = target_distances <= inclusion_radius  # [B, N, N]
-            
-            # 排除对角线（自己与自己的距离）
+            # 2. 创建 inclusion mask：只考虑 inclusion_radius 范围内的邻居
+            # 排除对角线（自己与自己）
             diag_mask = torch.eye(n_atoms, device=device).bool().unsqueeze(0).expand(batch_size, -1, -1)
-            inclusion_mask = inclusion_mask & (~diag_mask)
+            inclusion_mask = (target_distances <= inclusion_radius) & (~diag_mask)  # [B, N, N]
             
             # 3. 计算距离差异
             distance_diff = torch.abs(pred_distances - target_distances)  # [B, N, N]
             
-            # 4. 对每个阈值计算保存的接触数
-            lddt_scores = []
+            # 4. 对每个阈值，计算保持的距离对
+            # 标准 lDDT: 对每个原子，计算其邻居的距离保持率，然后对所有阈值求平均
+            lddt_per_threshold = []
+            
             for cutoff in cutoff_distances:
+                # 对于每个阈值，检查哪些距离对被保持
                 preserved = (distance_diff <= cutoff) & inclusion_mask  # [B, N, N]
-                preserved_count = torch.sum(preserved.float(), dim=(1, 2))  # [B]
-                total_count = torch.sum(inclusion_mask.float(), dim=(1, 2))  # [B]
+                
+                # 对每个原子，计算其保持的邻居比例
+                preserved_per_atom = preserved.sum(dim=2).float()  # [B, N] - 每个原子保持的邻居数
+                total_neighbors_per_atom = inclusion_mask.sum(dim=2).float()  # [B, N] - 每个原子的总邻居数
                 
                 # 避免除零
-                score = torch.where(total_count > 0, 
-                                  preserved_count / total_count, 
-                                  torch.zeros_like(preserved_count))
-                lddt_scores.append(score)
+                ratio_per_atom = torch.where(
+                    total_neighbors_per_atom > 0,
+                    preserved_per_atom / total_neighbors_per_atom,
+                    torch.zeros_like(preserved_per_atom)
+                )  # [B, N]
+                
+                # 对每个 batch，计算有邻居的原子的平均比例
+                has_neighbors = total_neighbors_per_atom > 0  # [B, N]
+                
+                threshold_score = torch.where(
+                    has_neighbors.sum(dim=1) > 0,
+                    (ratio_per_atom * has_neighbors.float()).sum(dim=1) / has_neighbors.sum(dim=1).float(),
+                    torch.zeros(batch_size, device=device)
+                )  # [B]
+                
+                lddt_per_threshold.append(threshold_score)
             
-            # 5. lDDT是所有阈值的平均值，乘以100
-            lddt_final = torch.stack(lddt_scores, dim=0).mean(dim=0) * 100.0  # [B]
+            # 5. lDDT = 所有阈值的平均，转换为 0-100 的分数
+            lddt_final = torch.stack(lddt_per_threshold, dim=0).mean(dim=0) * 100.0  # [B]
             
             return torch.clamp(lddt_final, min=0.0, max=100.0)
             
         except Exception as e:
             logger.warning(f"RNA lDDT计算失败: {e}")
+            import traceback
+            traceback.print_exc()
             return torch.zeros(batch_size, device=device)
     
     def _compute_rna_clash_score(self, 
