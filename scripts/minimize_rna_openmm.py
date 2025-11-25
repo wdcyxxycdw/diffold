@@ -155,7 +155,7 @@ def main():
     parser.add_argument(
         '--max-iter',
         type=int,
-        default=4000,
+        default=1000,
         help='最大迭代次数 (默认: 4000)'
     )
     

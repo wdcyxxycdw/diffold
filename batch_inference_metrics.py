@@ -25,6 +25,9 @@ from rhofold.utils import get_device, timing
 # 导入PDB转换功能
 from diffold.output import diffold_coords_to_pdb, validate_diffold_output
 
+# 导入指标计算模块
+from diffold.metrics import RNAEvaluationMetrics
+
 # 导入US-align wrapper用于权威指标计算
 import subprocess
 import re
@@ -35,7 +38,7 @@ SampleSelectionFunc = Callable[[List[Dict[str, Any]]], int]
 # ========== US-align Wrapper for Metrics Calculation ==========
 
 class USalignWrapper:
-    """US-align包装器 - 使用权威工具计算 RMSD, TM-score, GDT-TS"""
+    """US-align包装器 - 使用权威工具计算 RMSD, TM-score (d0=5Å), GDT-TS"""
     
     def __init__(self, usalign_path: str = "./USalign/USalign"):
         self.usalign_path = usalign_path
@@ -51,12 +54,14 @@ class USalignWrapper:
     
     def calculate_metrics(self, pred_pdb: str, native_pdb: str) -> Dict:
         """
-        使用 US-align 计算 RMSD, TM-score, GDT-TS
+        使用 US-align 计算 RMSD, TM-score (d0=5Å), GDT-TS
+        
+        注意：TM-score 使用固定的 d0=5Å，使不同长度的结构具有可比性
         
         返回格式：
         {
             'rmsd': float,
-            'tm_score': float,
+            'tm_score': float,  # 使用 d0=5Å
             'gdt_ts': float,
             'aligned_length': int,
             'seq_identity': float,
@@ -70,7 +75,8 @@ class USalignWrapper:
                 pred_pdb,
                 native_pdb,
                 "-mol", "RNA",  # RNA 模式
-                "-ter", "0"     # 不按 TER 记录分割链
+                "-ter", "0",    # 不按 TER 记录分割链
+                "-d", "5"       # 固定 d0=5Å 用于 TM-score 计算
             ]
             
             result = subprocess.run(
@@ -96,9 +102,13 @@ class USalignWrapper:
             if rmsd_match:
                 metrics['rmsd'] = float(rmsd_match.group(1))
             
-            # TM-score (使用第一个，通常是按第一个结构归一化的)
+            # TM-score (使用 d0=5 的那个，即第3个 TM-score 值)
             tm_matches = re.findall(r'TM-score=\s*([\d.]+)', output)
-            if tm_matches:
+            if len(tm_matches) >= 3:
+                # 第3个是 scaled by user-specified d0=5.00 的值
+                metrics['tm_score'] = float(tm_matches[2])
+            elif tm_matches:
+                # 如果只有2个或1个，使用第一个作为后备
                 metrics['tm_score'] = float(tm_matches[0])
             
             # GDT-TS
@@ -532,11 +542,31 @@ def compute_metrics_for_sample(model: Diffold,
                     
                     if 'error' not in usalign_metrics:
                         sample_result['rmsd'] = usalign_metrics.get('rmsd', float('inf'))
+                        
+                        # 计算额外的lDDT和clash score指标
+                        metrics_calculator = RNAEvaluationMetrics()
+                        
+                        # 计算lDDT (需要预测和目标坐标)
+                        pred_coords_for_lddt = sample_result['predicted_coords'].unsqueeze(0) if sample_result['predicted_coords'].dim() == 2 else sample_result['predicted_coords']
+                        target_coords_for_lddt = target_coords.to(pred_coords_for_lddt.device)
+                        
+                        lddt_score = metrics_calculator._compute_rna_lddt(
+                            pred_coords_for_lddt, 
+                            target_coords_for_lddt
+                        )
+                        
+                        # 计算clash score (只需要预测坐标)
+                        clash_score = metrics_calculator._compute_rna_clash_score(
+                            pred_coords_for_lddt
+                        )
+                        
                         sample_result['metrics'] = {
-                            'avg_rmsd': usalign_metrics.get('rmsd'),
-                            'avg_tm_score': usalign_metrics.get('tm_score'),
-                            'gdt_ts': usalign_metrics.get('gdt_ts'),
-                            'aligned_length': usalign_metrics.get('aligned_length'),
+                            'avg_rmsd': usalign_metrics.get('rmsd', float('inf')),
+                            'avg_tm_score': usalign_metrics.get('tm_score', 0.0),
+                            'avg_lddt': float(lddt_score[0].item()) if torch.is_tensor(lddt_score) else float(lddt_score),
+                            'avg_clash_score': float(clash_score[0].item()) if torch.is_tensor(clash_score) else float(clash_score),
+                            'gdt_ts': usalign_metrics.get('gdt_ts', 0.0),
+                            'aligned_length': usalign_metrics.get('aligned_length', 0),
                         }
                     else:
                         logger.warning(f"样本 {sample_name} 采样 {i}: US-align失败: {usalign_metrics['error']}")
@@ -616,9 +646,12 @@ def compute_metrics_for_sample(model: Diffold,
             'pdb_file_paths': pdb_file_paths,
             'best_pdb_path': str(best_pdb_path) if pdb_file_paths else None,
             # 使用最佳采样的指标作为主要指标
-            **best_sample['metrics'],
-            'detailed_metrics': best_sample['detailed_metrics']
+            **best_sample['metrics']
         }
+        
+        # 如果有 detailed_metrics，添加到结果中
+        if 'detailed_metrics' in best_sample:
+            result_dict['detailed_metrics'] = best_sample['detailed_metrics']
         
         # 如果保存所有采样，添加所有采样的信息
         if save_all_samples:
@@ -627,9 +660,11 @@ def compute_metrics_for_sample(model: Diffold,
                 sample_info = {
                     'sample_idx': sample_result['sample_idx'],
                     'rmsd': sample_result['rmsd'],
-                    'metrics': sample_result['metrics'],
-                    'detailed_metrics': sample_result['detailed_metrics']
+                    'metrics': sample_result['metrics']
                 }
+                # 如果有 detailed_metrics，添加到信息中
+                if 'detailed_metrics' in sample_result:
+                    sample_info['detailed_metrics'] = sample_result['detailed_metrics']
                 all_samples_info.append(sample_info)
             result_dict['all_samples'] = all_samples_info
             

@@ -209,7 +209,7 @@ class ClashScoreCalculator:
 
 
 class USalignWrapper:
-    """US-align 包装器 - 计算 RMSD, TM-score, GDT-TS"""
+    """US-align 包装器 - 计算 RMSD, TM-score (d0=5Å), GDT-TS"""
     
     def __init__(self, usalign_path: str = "./USalign/USalign"):
         self.usalign_path = usalign_path
@@ -225,12 +225,14 @@ class USalignWrapper:
     
     def calculate_metrics(self, pred_pdb: str, native_pdb: str) -> Dict:
         """
-        使用 US-align 计算 RMSD 和 TM-score
+        使用 US-align 计算 RMSD, TM-score (d0=5Å), GDT-TS
+        
+        注意：TM-score 使用固定的 d0=5Å，使不同长度的结构具有可比性
         
         返回格式：
         {
             'rmsd': float,
-            'tm_score': float,
+            'tm_score': float,  # 使用 d0=5Å
             'gdt_ts': float,
             'aligned_length': int,
             'seq_identity': float,
@@ -244,7 +246,8 @@ class USalignWrapper:
                 pred_pdb,
                 native_pdb,
                 "-mol", "RNA",  # RNA 模式
-                "-ter", "0"     # 不按 TER 记录分割链
+                "-ter", "0",    # 不按 TER 记录分割链
+                "-d", "5"       # 固定 d0=5Å 用于 TM-score 计算
             ]
             
             result = subprocess.run(
@@ -270,9 +273,13 @@ class USalignWrapper:
             if rmsd_match:
                 metrics['rmsd'] = float(rmsd_match.group(1))
             
-            # TM-score (使用第一个，通常是按第一个结构归一化的)
+            # TM-score (使用 d0=5 的那个，即第3个 TM-score 值)
             tm_matches = re.findall(r'TM-score=\s*([\d.]+)', output)
-            if tm_matches:
+            if len(tm_matches) >= 3:
+                # 第3个是 scaled by user-specified d0=5.00 的值
+                metrics['tm_score'] = float(tm_matches[2])
+            elif tm_matches:
+                # 如果只有2个或1个，使用第一个作为后备
                 metrics['tm_score'] = float(tm_matches[0])
             
             # GDT-TS

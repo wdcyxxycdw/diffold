@@ -30,6 +30,9 @@ from diffold.dataloader import create_data_loaders
 # 导入PDB转换功能
 from diffold.rhofold_output import rhofold_coords_to_pdb, validate_rhofold_output, extract_rhofold_features
 
+# 导入指标计算模块
+from diffold.metrics import RNAEvaluationMetrics
+
 # 导入Amber relaxation
 from rhofold.relax.relax import AmberRelaxation
 
@@ -40,7 +43,7 @@ import re
 # ========== US-align Wrapper for Metrics Calculation ==========
 
 class USalignWrapper:
-    """US-align包装器 - 使用权威工具计算 RMSD, TM-score, GDT-TS"""
+    """US-align包装器 - 使用权威工具计算 RMSD, TM-score (d0=5Å), GDT-TS"""
     
     def __init__(self, usalign_path: str = "./USalign/USalign"):
         self.usalign_path = usalign_path
@@ -56,12 +59,14 @@ class USalignWrapper:
     
     def calculate_metrics(self, pred_pdb: str, native_pdb: str) -> Dict:
         """
-        使用 US-align 计算 RMSD, TM-score, GDT-TS
+        使用 US-align 计算 RMSD, TM-score (d0=5Å), GDT-TS
+        
+        注意：TM-score 使用固定的 d0=5Å，使不同长度的结构具有可比性
         
         返回格式：
         {
             'rmsd': float,
-            'tm_score': float,
+            'tm_score': float,  # 使用 d0=5Å
             'gdt_ts': float,
             'aligned_length': int,
             'seq_identity': float,
@@ -75,7 +80,8 @@ class USalignWrapper:
                 pred_pdb,
                 native_pdb,
                 "-mol", "RNA",  # RNA 模式
-                "-ter", "0"     # 不按 TER 记录分割链
+                "-ter", "0",    # 不按 TER 记录分割链
+                "-d", "5"       # 固定 d0=5Å 用于 TM-score 计算
             ]
             
             result = subprocess.run(
@@ -101,9 +107,13 @@ class USalignWrapper:
             if rmsd_match:
                 metrics['rmsd'] = float(rmsd_match.group(1))
             
-            # TM-score (使用第一个，通常是按第一个结构归一化的)
+            # TM-score (使用 d0=5 的那个，即第3个 TM-score 值)
             tm_matches = re.findall(r'TM-score=\s*([\d.]+)', output)
-            if tm_matches:
+            if len(tm_matches) >= 3:
+                # 第3个是 scaled by user-specified d0=5.00 的值
+                metrics['tm_score'] = float(tm_matches[2])
+            elif tm_matches:
+                # 如果只有2个或1个，使用第一个作为后备
                 metrics['tm_score'] = float(tm_matches[0])
             
             # GDT-TS
@@ -473,13 +483,57 @@ def compute_metrics_for_sample(model: RhoFold,
             
             if 'error' not in usalign_metrics:
                 current_rmsd = usalign_metrics.get('rmsd', float('inf'))
+                
+                # 计算额外的lDDT和clash score指标
+                # 使用保存的PDB文件来计算，因为它已经正确过滤了padding原子
+                metrics_calculator = RNAEvaluationMetrics()
+                
+                def read_pdb_coords(pdb_path):
+                    """从PDB文件读取原子坐标"""
+                    coords = []
+                    with open(pdb_path, 'r') as f:
+                        for line in f:
+                            if line.startswith('ATOM'):
+                                x = float(line[30:38].strip())
+                                y = float(line[38:46].strip())
+                                z = float(line[46:54].strip())
+                                coords.append([x, y, z])
+                    return torch.tensor(coords, dtype=torch.float32)
+                
+                try:
+                    # 从PDB文件读取坐标
+                    pred_coords_from_pdb = read_pdb_coords(str(final_pdb)).unsqueeze(0)
+                    target_coords_from_pdb = read_pdb_coords(str(native_pdb_path)).unsqueeze(0)
+                    
+                    logger.debug(f"样本 {sample_name}: 从PDB读取坐标 - 预测: {pred_coords_from_pdb.shape}, 目标: {target_coords_from_pdb.shape}")
+                    
+                    # 计算lDDT
+                    lddt_score = metrics_calculator._compute_rna_lddt(
+                        pred_coords_from_pdb, 
+                        target_coords_from_pdb
+                    )
+                    
+                    # 计算clash score
+                    clash_score = metrics_calculator._compute_rna_clash_score(
+                        pred_coords_from_pdb
+                    )
+                    
+                    logger.debug(f"样本 {sample_name}: 从PDB计算指标 - lDDT: {lddt_score[0].item():.2f}, Clash: {clash_score[0].item():.2f}")
+                    
+                except Exception as e:
+                    logger.warning(f"样本 {sample_name}: 从PDB读取坐标失败: {e}")
+                    lddt_score = torch.tensor([0.0])
+                    clash_score = torch.tensor([0.0])
+                
                 sample_metrics = {
-                    'avg_rmsd': usalign_metrics.get('rmsd'),
-                    'avg_tm_score': usalign_metrics.get('tm_score'),
-                    'gdt_ts': usalign_metrics.get('gdt_ts'),
-                    'aligned_length': usalign_metrics.get('aligned_length'),
+                    'avg_rmsd': usalign_metrics.get('rmsd', float('inf')),
+                    'avg_tm_score': usalign_metrics.get('tm_score', 0.0),
+                    'avg_lddt': float(lddt_score[0].item()) if torch.is_tensor(lddt_score) else float(lddt_score),
+                    'avg_clash_score': float(clash_score[0].item()) if torch.is_tensor(clash_score) else float(clash_score),
+                    'gdt_ts': usalign_metrics.get('gdt_ts', 0.0),
+                    'aligned_length': usalign_metrics.get('aligned_length', 0),
                 }
-                logger.debug(f"样本 {sample_name}: US-align指标: RMSD={current_rmsd:.4f}, TM={sample_metrics.get('avg_tm_score', 0):.4f}")
+                logger.debug(f"样本 {sample_name}: US-align指标: RMSD={current_rmsd:.4f}, TM={sample_metrics.get('avg_tm_score', 0):.4f}, lDDT={sample_metrics.get('avg_lddt', 0):.2f}, Clash={sample_metrics.get('avg_clash_score', 0):.2f}")
             else:
                 logger.warning(f"样本 {sample_name}: US-align失败: {usalign_metrics['error']}")
                 sample_metrics = {}
@@ -579,7 +633,7 @@ def generate_report(results: List[Dict[str, Any]], report_file: Path, logger: lo
                 f.write(f"  最大值: {np.max(rmsd_values):.4f}Å\n\n")
             
             # 计算其他指标统计
-            metrics_keys = ['avg_tm_score', 'avg_lddt', 'avg_confidence']
+            metrics_keys = ['avg_tm_score', 'avg_lddt', 'avg_clash_score', 'gdt_ts', 'avg_confidence']
             available_metrics = [key for key in metrics_keys if any(key in r for r in successful_results)]
             
             if available_metrics:
@@ -587,9 +641,20 @@ def generate_report(results: List[Dict[str, Any]], report_file: Path, logger: lo
                 f.write("-" * 30 + "\n")
                 
                 for metric in available_metrics:
-                    values = [r[metric] for r in successful_results if metric in r]
+                    values = [r[metric] for r in successful_results if metric in r and r[metric] is not None]
+                    # 对于gdt_ts，只统计非零值
+                    if metric == 'gdt_ts':
+                        values = [v for v in values if v > 0]
                     if values:
-                        f.write(f"{metric}:\n")
+                        metric_name = {
+                            'avg_tm_score': 'TM-score',
+                            'avg_lddt': 'lDDT',
+                            'avg_clash_score': 'Clash Score',
+                            'gdt_ts': 'GDT-TS',
+                            'avg_confidence': '置信度'
+                        }.get(metric, metric)
+                        
+                        f.write(f"{metric_name}:\n")
                         f.write(f"  平均值: {np.mean(values):.4f}\n")
                         f.write(f"  中位数: {np.median(values):.4f}\n")
                         f.write(f"  标准差: {np.std(values):.4f}\n")

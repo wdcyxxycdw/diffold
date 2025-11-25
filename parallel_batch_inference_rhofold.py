@@ -275,6 +275,10 @@ def merge_results(results: list, output_dir: str):
     all_results = []
     all_detailed_metrics = {}
     
+    # 创建合并的PDB文件目录
+    merged_pdb_dir = output_path / "rhofold_merged_pdb_files"
+    merged_pdb_dir.mkdir(parents=True, exist_ok=True)
+    
     # 收集所有结果
     for gpu_id, success, gpu_output_dir in results:
         if not success:
@@ -293,6 +297,15 @@ def merge_results(results: list, output_dir: str):
             with open(detailed_file, 'r') as f:
                 gpu_detailed = json.load(f)
                 all_detailed_metrics.update(gpu_detailed)
+        
+        # 复制PDB文件到合并目录
+        gpu_pdb_dir = Path(gpu_output_dir) / "rhofold_pdb_files"
+        if gpu_pdb_dir.exists():
+            for pdb_file in gpu_pdb_dir.glob("*.pdb"):
+                # 复制PDB文件
+                dest_file = merged_pdb_dir / pdb_file.name
+                if not dest_file.exists():  # 避免重复
+                    shutil.copy2(pdb_file, dest_file)
     
     if not all_results:
         print("⚠️  警告: 没有可合并的结果")
@@ -320,6 +333,10 @@ def merge_results(results: list, output_dir: str):
     generate_merged_report(all_results, output_path / "rhofold_merged_report.txt")
     print(f"  报告: {output_path / 'rhofold_merged_report.txt'}")
     
+    # 统计PDB文件
+    pdb_count = len(list(merged_pdb_dir.glob("*.pdb")))
+    print(f"  PDB文件: {merged_pdb_dir} ({pdb_count} 个文件)")
+    
     print(f"✅ 结果合并完成! 共 {len(all_results)} 个样本")
 
 
@@ -341,7 +358,8 @@ def generate_merged_report(results: list, report_file: Path):
         
         if successful_results:
             # RMSD统计
-            rmsd_values = [r['rmsd'] for r in successful_results if 'rmsd' in r]
+            rmsd_values = [r.get('rmsd', r.get('avg_rmsd', float('inf'))) for r in successful_results]
+            rmsd_values = [v for v in rmsd_values if v != float('inf')]
             if rmsd_values:
                 f.write("RMSD统计:\n")
                 f.write(f"  平均值: {np.mean(rmsd_values):.4f}\n")
@@ -350,15 +368,45 @@ def generate_merged_report(results: list, report_file: Path):
                 f.write(f"  最小值: {np.min(rmsd_values):.4f}\n")
                 f.write(f"  最大值: {np.max(rmsd_values):.4f}\n\n")
             
-            # 其他指标
-            metrics_keys = ['tm_score', 'lddt', 'clash_score']
-            for metric in metrics_keys:
-                values = [r[metric] for r in successful_results if metric in r]
-                if values:
-                    f.write(f"{metric}:\n")
-                    f.write(f"  平均值: {np.mean(values):.4f}\n")
-                    f.write(f"  中位数: {np.median(values):.4f}\n")
-                    f.write(f"  标准差: {np.std(values):.4f}\n\n")
+            # TM-score统计
+            tm_values = [r.get('avg_tm_score') for r in successful_results if 'avg_tm_score' in r]
+            if tm_values:
+                f.write("TM-score统计:\n")
+                f.write(f"  平均值: {np.mean(tm_values):.4f}\n")
+                f.write(f"  中位数: {np.median(tm_values):.4f}\n")
+                f.write(f"  标准差: {np.std(tm_values):.4f}\n")
+                f.write(f"  最小值: {np.min(tm_values):.4f}\n")
+                f.write(f"  最大值: {np.max(tm_values):.4f}\n\n")
+            
+            # lDDT统计
+            lddt_values = [r.get('avg_lddt') for r in successful_results if 'avg_lddt' in r]
+            if lddt_values:
+                f.write("lDDT统计:\n")
+                f.write(f"  平均值: {np.mean(lddt_values):.4f}\n")
+                f.write(f"  中位数: {np.median(lddt_values):.4f}\n")
+                f.write(f"  标准差: {np.std(lddt_values):.4f}\n")
+                f.write(f"  最小值: {np.min(lddt_values):.4f}\n")
+                f.write(f"  最大值: {np.max(lddt_values):.4f}\n\n")
+            
+            # Clash Score统计
+            clash_values = [r.get('avg_clash_score') for r in successful_results if 'avg_clash_score' in r]
+            if clash_values:
+                f.write("Clash Score统计:\n")
+                f.write(f"  平均值: {np.mean(clash_values):.4f}\n")
+                f.write(f"  中位数: {np.median(clash_values):.4f}\n")
+                f.write(f"  标准差: {np.std(clash_values):.4f}\n")
+                f.write(f"  最小值: {np.min(clash_values):.4f}\n")
+                f.write(f"  最大值: {np.max(clash_values):.4f}\n\n")
+            
+            # GDT-TS统计
+            gdt_values = [r.get('gdt_ts') for r in successful_results if 'gdt_ts' in r and r.get('gdt_ts', 0) > 0]
+            if gdt_values:
+                f.write("GDT-TS统计:\n")
+                f.write(f"  平均值: {np.mean(gdt_values):.4f}\n")
+                f.write(f"  中位数: {np.median(gdt_values):.4f}\n")
+                f.write(f"  标准差: {np.std(gdt_values):.4f}\n")
+                f.write(f"  最小值: {np.min(gdt_values):.4f}\n")
+                f.write(f"  最大值: {np.max(gdt_values):.4f}\n\n")
         
         if failed_results:
             f.write("失败样本:\n")

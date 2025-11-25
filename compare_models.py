@@ -42,14 +42,25 @@ def load_and_prepare_data(diffold_path, rhofold_path):
     diffold_df = pd.read_csv(diffold_path)
     diffold_df = diffold_df[diffold_df['status'] == 'success'].copy()
     
+    print(f"Available columns in Diffold CSV: {list(diffold_df.columns)}")
+    
     # Select appropriate columns for Diffold data
-    # Try 'best_rmsd' first, fallback to 'rmsd' if not available
-    rmsd_col = 'best_rmsd' if 'best_rmsd' in diffold_df.columns else 'rmsd'
+    # Try 'best_rmsd' first, then 'avg_rmsd', fallback to 'rmsd' if not available
+    if 'best_rmsd' in diffold_df.columns:
+        rmsd_col = 'best_rmsd'
+    elif 'avg_rmsd' in diffold_df.columns:
+        rmsd_col = 'avg_rmsd'
+    else:
+        rmsd_col = 'rmsd'
+    
+    print(f"Using RMSD column for Diffold: {rmsd_col}")
+    
     diffold_data = {
         'rmsd': diffold_df[rmsd_col].values,
         'tm_score': diffold_df['avg_tm_score'].values,
         'lddt': diffold_df['avg_lddt'].values,
         'clash_score': diffold_df['avg_clash_score'].values,
+        'sample_name': diffold_df['sample_name'].values,
         'model': ['Diffold'] * len(diffold_df)
     }
     
@@ -58,18 +69,29 @@ def load_and_prepare_data(diffold_path, rhofold_path):
     rhofold_df = pd.read_csv(rhofold_path)
     rhofold_df = rhofold_df[rhofold_df['status'] == 'success'].copy()
     
-    # Select columns for RhoFold data
+    print(f"Available columns in RhoFold CSV: {list(rhofold_df.columns)}")
+    
+    # Select appropriate columns for RhoFold data
+    # Try 'rmsd' first, then 'avg_rmsd'
+    if 'rmsd' in rhofold_df.columns:
+        rmsd_col = 'rmsd'
+    else:
+        rmsd_col = 'avg_rmsd'
+    
+    print(f"Using RMSD column for RhoFold: {rmsd_col}")
+    
     rhofold_data = {
-        'rmsd': rhofold_df['rmsd'].values,
+        'rmsd': rhofold_df[rmsd_col].values,
         'tm_score': rhofold_df['avg_tm_score'].values,
         'lddt': rhofold_df['avg_lddt'].values,
         'clash_score': rhofold_df['avg_clash_score'].values,
+        'sample_name': rhofold_df['sample_name'].values,
         'model': ['Rhofold+(unrelaxed)'] * len(rhofold_df)
     }
     
     # Combine data
     combined_data = {}
-    for key in ['rmsd', 'tm_score', 'lddt', 'clash_score']:
+    for key in ['rmsd', 'tm_score', 'lddt', 'clash_score', 'sample_name']:
         combined_data[key] = np.concatenate([diffold_data[key], rhofold_data[key]])
     combined_data['model'] = diffold_data['model'] + rhofold_data['model']
     
@@ -297,25 +319,25 @@ def generate_summary_statistics(df):
 def main():
     """Main function"""
     parser = argparse.ArgumentParser(
-        description='Compare Diffold and RhoFold+ performance on CASP15 dataset'
+        description='Compare Diffold and RhoFold+ performance on CASP16 dataset'
     )
     parser.add_argument(
         '--diffold-path',
         type=str,
-        required=True,
-        help='Path to Diffold results CSV file'
+        default='casp16_eval_results/merged_results.csv',
+        help='Path to Diffold results CSV file (default: casp16_eval_results/merged_results.csv)'
     )
     parser.add_argument(
         '--rhofold-path',
         type=str,
-        required=True,
-        help='Path to RhoFold results CSV file'
+        default='casp16_rhofold_parallel_output/rhofold_merged_results.csv',
+        help='Path to RhoFold results CSV file (default: casp16_rhofold_parallel_output/rhofold_merged_results.csv)'
     )
     parser.add_argument(
         '--output-dir',
         type=str,
-        default='plots',
-        help='Directory to save output plots (default: plots)'
+        default='comparison_plots',
+        help='Directory to save output plots (default: comparison_plots)'
     )
     
     args = parser.parse_args()
