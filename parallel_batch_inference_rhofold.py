@@ -172,7 +172,7 @@ def run_parallel_inference(args):
         # 构建命令（使用固定的 fold-997 避免与 Diffold 的 fold-999 冲突）
         cmd = [
             sys.executable,  # python
-            "batch_inference_rhofold.py",
+            "batch_inference_rf.py",  # 使用新的简化推理脚本
             "--rhofold_checkpoint", args.rhofold_checkpoint,
             "--data_dir", gpu_data_dir,
             "--output_dir", str(gpu_output_dir),
@@ -181,7 +181,6 @@ def run_parallel_inference(args):
             "--max_sequence_length", str(args.max_sequence_length),
             "--num_workers", str(args.num_workers),
             "--log_level", args.log_level,
-            "--usalign_path", args.usalign_path,  # US-align路径
         ]
         
         # 添加可选参数
@@ -285,7 +284,7 @@ def merge_results(results: list, output_dir: str):
             continue
         
         # 读取JSON结果
-        json_file = Path(gpu_output_dir) / "rhofold_test_results.json"
+        json_file = Path(gpu_output_dir) / "rhofold_inference_results.json"
         if json_file.exists():
             with open(json_file, 'r') as f:
                 gpu_results = json.load(f)
@@ -322,12 +321,6 @@ def merge_results(results: list, output_dir: str):
     df = pd.DataFrame(all_results)
     df.to_csv(merged_csv, index=False)
     print(f"  CSV: {merged_csv}")
-    
-    # 保存详细指标
-    merged_detailed = output_path / "rhofold_merged_detailed_metrics.json"
-    with open(merged_detailed, 'w') as f:
-        json.dump(all_detailed_metrics, f, indent=2, default=str)
-    print(f"  详细指标: {merged_detailed}")
     
     # 生成合并报告
     generate_merged_report(all_results, output_path / "rhofold_merged_report.txt")
@@ -473,10 +466,6 @@ def main():
     # Amber relaxation参数
     parser.add_argument("--relax_steps", type=int, default=None,
                        help="Amber relaxation步数（默认: None，不进行relaxation）")
-    
-    # 指标计算参数
-    parser.add_argument("--usalign_path", default="./USalign/USalign",
-                       help="US-align可执行文件路径 (用于计算权威指标)")
     
     # 其他参数
     parser.add_argument("--log_level", default="INFO",

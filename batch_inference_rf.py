@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 """
-RhoFold模型批量测试脚本
-基于batch_inference_metrics.py和inference_rf.py设计
-专门用于测试RhoFold模型在验证集上的性能
+RhoFold批量推理脚本
+对验证集样本进行批量推理，输出PDB结构文件
 """
 
 import argparse
 import json
 import logging
-import os
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Callable
+from typing import Dict, List, Any, Optional
 import pandas as pd
 import torch
 import numpy as np
@@ -144,7 +142,7 @@ class USalignWrapper:
 
 def setup_logging(output_dir: str, log_level: str = "INFO"):
     """设置日志"""
-    log_file = Path(output_dir) / "rhofold_test.log"
+    log_file = Path(output_dir) / "rhofold_inference.log"
     
     # 创建日志目录
     log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -165,10 +163,12 @@ def setup_logging(output_dir: str, log_level: str = "INFO"):
     # 配置根日志器
     logger = logging.getLogger()
     logger.setLevel(getattr(logging, log_level.upper()))
+    logger.handlers = []  # 清除现有处理器
     logger.addHandler(file_handler)
     logger.addHandler(stream_handler)
     
     return logger
+
 
 def load_rhofold_model(config: argparse.Namespace, logger: logging.Logger):
     """加载RhoFold模型"""
@@ -181,7 +181,6 @@ def load_rhofold_model(config: argparse.Namespace, logger: logging.Logger):
     if config.rhofold_checkpoint:
         logger.info(f"加载RhoFold检查点: {config.rhofold_checkpoint}")
         try:
-            # 首先尝试使用weights_only=True加载
             checkpoint = torch.load(config.rhofold_checkpoint, map_location=config.device, weights_only=True)
             if isinstance(checkpoint, dict) and 'model' in checkpoint:
                 model.load_state_dict(checkpoint['model'])
@@ -190,19 +189,15 @@ def load_rhofold_model(config: argparse.Namespace, logger: logging.Logger):
             logger.info("RhoFold检查点加载完成")
         except Exception as e:
             logger.warning(f"weights_only=True 加载失败，尝试使用 weights_only=False: {e}")
-            try:
-                # 回退到weights_only=False
-                checkpoint = torch.load(config.rhofold_checkpoint, map_location=config.device, weights_only=False)
-                if isinstance(checkpoint, dict) and 'model' in checkpoint:
-                    model.load_state_dict(checkpoint['model'])
-                else:
-                    model.load_state_dict(checkpoint)
-                logger.info("RhoFold检查点加载完成")
-            except Exception as e2:
-                logger.error(f"RhoFold检查点加载失败: {e2}")
-                raise
+            checkpoint = torch.load(config.rhofold_checkpoint, map_location=config.device, weights_only=False)
+            if isinstance(checkpoint, dict) and 'model' in checkpoint:
+                model.load_state_dict(checkpoint['model'])
+            else:
+                model.load_state_dict(checkpoint)
+            logger.info("RhoFold检查点加载完成")
     
     return model
+
 
 def load_validation_data(config: argparse.Namespace, logger: logging.Logger):
     """加载验证数据"""
@@ -218,10 +213,10 @@ def load_validation_data(config: argparse.Namespace, logger: logging.Logger):
     
     logger.info(f"验证集样本数量: {len(sample_names)}")
     
-    # 创建数据加载器（复用Diffold的数据加载器）
+    # 创建数据加载器
     train_loader, valid_loader = create_data_loaders(
         data_dir=config.data_dir,
-        batch_size=1,  # 批量推理使用batch_size=1
+        batch_size=1,
         max_length=config.max_sequence_length,
         num_workers=config.num_workers,
         fold=config.fold,
@@ -233,24 +228,20 @@ def load_validation_data(config: argparse.Namespace, logger: logging.Logger):
     
     return valid_loader, sample_names
 
+
 def find_existing_msa(sample_name: str, config: argparse.Namespace, logger: logging.Logger) -> Optional[str]:
     """查找现有的MSA文件"""
-    # 定义可能的MSA文件路径和扩展名
     possible_paths = [
-        # 优先查找rMSA目录
         Path(config.data_dir) / "rMSA" / f"{sample_name}.a3m",
         Path(config.data_dir) / "rMSA" / f"{sample_name}.fasta",
-        # 如果指定了自定义MSA目录
         Path(config.msa_dir) / f"{sample_name}.a3m" if hasattr(config, 'msa_dir') and config.msa_dir else None,
         Path(config.msa_dir) / f"{sample_name}.fasta" if hasattr(config, 'msa_dir') and config.msa_dir else None,
-        # 备选路径
         Path(config.data_dir) / "msa" / f"{sample_name}.a3m",
         Path(config.data_dir) / "msa" / f"{sample_name}.fasta",
         Path(config.data_dir) / "alignments" / f"{sample_name}.a3m",
         Path(config.data_dir) / "alignments" / f"{sample_name}.fasta",
     ]
     
-    # 过滤掉None值
     possible_paths = [p for p in possible_paths if p is not None]
     
     for msa_path in possible_paths:
@@ -258,75 +249,23 @@ def find_existing_msa(sample_name: str, config: argparse.Namespace, logger: logg
             logger.debug(f"找到现有MSA文件: {msa_path}")
             return str(msa_path)
     
-    logger.debug(f"未找到样本 {sample_name} 的MSA文件，尝试路径: {[str(p) for p in possible_paths]}")
+    logger.debug(f"未找到样本 {sample_name} 的MSA文件")
     return None
 
-def get_msa_or_fasta(sequence: str, sample_name: str, config: argparse.Namespace, 
-                     logger: logging.Logger) -> str:
-    """获取MSA文件或创建临时FASTA文件"""
-    if config.single_seq_pred:
-        # 单序列预测：创建临时FASTA文件
-        temp_fasta_path = Path(config.output_dir) / "temp" / f"{sample_name}.fasta"
-        temp_fasta_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        with open(temp_fasta_path, 'w') as f:
-            f.write(f">{sample_name}\n{sequence}\n")
-        
-        logger.debug(f"单序列模式，创建临时FASTA: {temp_fasta_path}")
-        return str(temp_fasta_path)
-    
-    else:
-        # 查找现有MSA文件
-        msa_path = find_existing_msa(sample_name, config, logger)
-        
-        if msa_path:
-            return msa_path
-        
-        # 如果没有找到MSA文件，回退到单序列模式
-        logger.warning(f"样本 {sample_name}: 未找到MSA文件，回退到单序列模式")
-        temp_fasta_path = Path(config.output_dir) / "temp" / f"{sample_name}.fasta"
-        temp_fasta_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        with open(temp_fasta_path, 'w') as f:
-            f.write(f">{sample_name}\n{sequence}\n")
-        
-        return str(temp_fasta_path)
 
-def compute_metrics_for_sample(model: RhoFold, 
-                             batch: Dict[str, torch.Tensor], 
-                             sample_name: str,
-                             usalign_wrapper: USalignWrapper,
-                             output_dir: str,
-                             config: argparse.Namespace,
-                             logger: logging.Logger) -> Dict[str, Any]:
-    """计算单个样本的指标并保存PDB文件"""
+def inference_sample(model: RhoFold, 
+                    batch: Dict[str, torch.Tensor], 
+                    sample_name: str,
+                    output_dir: str,
+                    config: argparse.Namespace,
+                    logger: logging.Logger) -> Dict[str, Any]:
+    """对单个样本进行推理并保存PDB文件"""
     try:
         # 准备输入数据
         device = next(model.parameters()).device
-        tokens = batch['tokens'].to(device)
         sequences = batch['sequences']
-        coordinates = batch.get('coordinates', None)
-        missing_atom_masks = batch.get('missing_atom_masks', None)
-        rna_fm_tokens = batch.get('rna_fm_tokens', None)
         
-        if coordinates is not None:
-            coordinates = coordinates.to(device)
-        if missing_atom_masks is not None:
-            missing_atom_masks = missing_atom_masks.to(device)
-        if rna_fm_tokens is not None:
-            rna_fm_tokens = rna_fm_tokens.to(device)
-        
-        # 获取目标坐标
-        target_coords = coordinates
-        if target_coords is None:
-            logger.warning(f"样本 {sample_name}: 未获取到目标坐标")
-            return {
-                'sample_name': sample_name,
-                'status': 'failed',
-                'error': 'no_target_coords'
-            }
-        
-        # 从原始序列文件读取完整序列，而不是使用可能被截断的数据加载器序列
+        # 从原始序列文件读取完整序列
         sequence_file = Path(config.data_dir) / "sequences" / f"{sample_name}.fasta"
         if sequence_file.exists():
             with open(sequence_file, 'r') as f:
@@ -334,18 +273,16 @@ def compute_metrics_for_sample(model: RhoFold,
                 sequence = ''.join([line.strip() for line in lines if not line.startswith('>')])
             logger.debug(f"样本 {sample_name}: 从文件读取完整序列，长度: {len(sequence)}")
         else:
-            # 回退到数据加载器提供的序列
             sequence = sequences[0] if sequences else ""
             logger.warning(f"样本 {sample_name}: 未找到序列文件，使用数据加载器序列，长度: {len(sequence)}")
         
-        # 准备RhoFold输入
-        # 查找现有MSA文件
+        # 查找MSA文件
         msa_path = find_existing_msa(sample_name, config, logger)
         
         logger.debug(f"样本 {sample_name}: 开始RhoFold推理")
         
         try:
-            # 创建临时FASTA文件（使用完整序列）
+            # 创建临时FASTA文件
             temp_fasta_path = Path(config.output_dir) / "temp" / f"{sample_name}.fasta"
             temp_fasta_path.parent.mkdir(parents=True, exist_ok=True)
             
@@ -353,7 +290,6 @@ def compute_metrics_for_sample(model: RhoFold,
                 f.write(f">{sample_name}\n{sequence}\n")
             
             # 获取RhoFold特征
-            # 如果没有MSA文件，使用单序列预测
             if msa_path is None:
                 logger.info(f"样本 {sample_name}: 未找到MSA文件，使用单序列模式")
                 data_dict = get_features(str(temp_fasta_path), str(temp_fasta_path))
@@ -369,27 +305,22 @@ def compute_metrics_for_sample(model: RhoFold,
                 )
             
             # 提取预测结果
-            output = outputs[0][-1]  # 获取最后一层的输出
-            
-            # 使用专用函数提取特征
+            output = outputs[0][-1]
             features = extract_rhofold_features(output)
             
             # 提取坐标预测
             predicted_coords = features.get('predicted_coords')
             if predicted_coords is not None:
-                # 安全地处理坐标维度
                 if isinstance(predicted_coords, torch.Tensor):
                     if predicted_coords.dim() > 3:
-                        predicted_coords = predicted_coords.squeeze(0)  # 移除batch维度
+                        predicted_coords = predicted_coords.squeeze(0)
                 elif isinstance(predicted_coords, (list, tuple)):
-                    # 如果是列表或元组，取第一个元素
                     if len(predicted_coords) > 0:
                         predicted_coords = predicted_coords[0]
                         if isinstance(predicted_coords, torch.Tensor) and predicted_coords.dim() > 3:
                             predicted_coords = predicted_coords.squeeze(0)
-            confidence = features.get('confidence')
             
-            # 安全地处理置信度数据
+            confidence = features.get('confidence')
             if confidence is not None:
                 if isinstance(confidence, (list, tuple)):
                     if len(confidence) > 0:
@@ -405,18 +336,6 @@ def compute_metrics_for_sample(model: RhoFold,
                     'status': 'failed',
                     'error': 'no_predicted_coords'
                 }
-            
-            # 转换坐标格式以匹配目标坐标的维度
-            if len(predicted_coords.shape) == 3:
-                # 如果是[seq_len, atom_types, 3]，需要展平为[seq_len * atom_types, 3]
-                predicted_coords_flat = predicted_coords.view(-1, 3)
-            else:
-                predicted_coords_flat = predicted_coords
-            
-            # 指标将在保存PDB后使用US-align计算
-            current_rmsd = float('inf')  # 临时占位
-            sample_metrics = {}
-            detailed_metrics = {}
             
         except Exception as e:
             logger.error(f"样本 {sample_name} RhoFold推理失败: {e}")
@@ -442,12 +361,12 @@ def compute_metrics_for_sample(model: RhoFold,
                 sequence=sequence,
                 output_path=str(unrelaxed_pdb_path),
                 confidence=confidence,
-                model_instance=model,  # 传递RhoFold模型实例
+                model_instance=model,
                 logger_instance=logger
             )
             if success:
                 pdb_file_paths.append(str(unrelaxed_pdb_path))
-                logger.debug(f"样本 {sample_name}: Unrelaxed PDB文件已保存到 {unrelaxed_pdb_path}")
+                logger.debug(f"样本 {sample_name}: PDB文件已保存到 {unrelaxed_pdb_path}")
         except Exception as e:
             logger.warning(f"样本 {sample_name}: PDB文件保存失败: {e}")
             success = False
@@ -456,7 +375,7 @@ def compute_metrics_for_sample(model: RhoFold,
         relaxed_pdb_path = None
         if config.relax_steps is not None:
             relax_steps = int(config.relax_steps)
-            if relax_steps > 0 and success:  # 只有在成功保存了unrelaxed PDB后才进行relax
+            if relax_steps > 0 and success:
                 try:
                     logger.debug(f"样本 {sample_name}: 开始Amber优化，步数: {relax_steps}")
                     with timing(f'Amber Relaxation: {relax_steps} iterations', logger=logger):
@@ -546,19 +465,12 @@ def compute_metrics_for_sample(model: RhoFold,
             'sample_name': sample_name,
             'status': 'success',
             'sequence_length': len(sequence),
-            'sequence': sequence,
-            'rmsd': current_rmsd,
-            'predicted_coords_shape': list(predicted_coords.shape),
-            'target_coords_shape': list(target_coords.shape),
             'pdb_file_paths': pdb_file_paths,
-            'pdb_path': str(unrelaxed_pdb_path) if pdb_file_paths else None,
-            'relaxed_pdb_path': str(relaxed_pdb_path) if relaxed_pdb_path else None,
-            # 使用计算的指标
-            **sample_metrics,
-            'detailed_metrics': detailed_metrics
+            'main_pdb_path': str(unrelaxed_pdb_path) if pdb_file_paths else None,
+            'relaxed_pdb_path': str(relaxed_pdb_path) if relaxed_pdb_path else None
         }
         
-        logger.debug(f"样本 {sample_name}: RhoFold推理完成，RMSD: {current_rmsd:.4f}")
+        logger.debug(f"样本 {sample_name}: RhoFold推理完成")
         
         return result_dict
         
@@ -570,39 +482,30 @@ def compute_metrics_for_sample(model: RhoFold,
             'error': str(e)
         }
 
+
 def save_results(results: List[Dict[str, Any]], output_dir: str, logger: logging.Logger):
     """保存结果到文件"""
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     
     # 保存为JSON格式
-    json_file = output_path / "rhofold_test_results.json"
+    json_file = output_path / "rhofold_inference_results.json"
     with open(json_file, 'w') as f:
         json.dump(results, f, indent=2, default=str)
     logger.info(f"结果已保存到: {json_file}")
     
     # 保存为CSV格式
-    csv_file = output_path / "rhofold_test_results.csv"
+    csv_file = output_path / "rhofold_inference_results.csv"
     df = pd.DataFrame(results)
     df.to_csv(csv_file, index=False)
     logger.info(f"结果已保存到: {csv_file}")
     
-    # 保存详细指标数据
-    detailed_metrics_file = output_path / "detailed_metrics.json"
-    detailed_metrics_data = {}
-    for result in results:
-        if result['status'] == 'success' and 'detailed_metrics' in result:
-            detailed_metrics_data[result['sample_name']] = result['detailed_metrics']
-    
-    with open(detailed_metrics_file, 'w') as f:
-        json.dump(detailed_metrics_data, f, indent=2, default=str)
-    logger.info(f"详细指标数据已保存到: {detailed_metrics_file}")
-    
     # 生成统计报告
-    report_file = output_path / "rhofold_test_report.txt"
+    report_file = output_path / "rhofold_inference_report.txt"
     generate_report(results, report_file, logger)
     
-    return json_file, csv_file, detailed_metrics_file, report_file
+    return json_file, csv_file, report_file
+
 
 def generate_report(results: List[Dict[str, Any]], report_file: Path, logger: logging.Logger):
     """生成统计报告"""
@@ -610,7 +513,7 @@ def generate_report(results: List[Dict[str, Any]], report_file: Path, logger: lo
     failed_results = [r for r in results if r['status'] == 'failed']
     
     with open(report_file, 'w') as f:
-        f.write("RhoFold模型批量测试报告\n")
+        f.write("RhoFold批量推理报告\n")
         f.write("=" * 50 + "\n\n")
         
         f.write(f"总样本数: {len(results)}\n")
@@ -679,13 +582,14 @@ def generate_report(results: List[Dict[str, Any]], report_file: Path, logger: lo
     
     logger.info(f"报告已保存到: {report_file}")
 
+
 def main():
-    parser = argparse.ArgumentParser(description="RhoFold模型批量测试")
+    parser = argparse.ArgumentParser(description="RhoFold批量推理")
     
     # 基本参数
     parser.add_argument("--data_dir", default="./processed_data", 
                        help="数据目录路径")
-    parser.add_argument("--output_dir", default="./rhofold_test_output", 
+    parser.add_argument("--output_dir", default="./rhofold_inference_output", 
                        help="输出目录路径")
     parser.add_argument("--fold", type=int, default=3, 
                        help="验证集折数")
@@ -706,7 +610,7 @@ def main():
     parser.add_argument("--single_seq_pred", action="store_true", default=False,
                        help="使用单序列预测（不使用MSA）")
     parser.add_argument("--msa_dir", default=None,
-                       help="MSA文件目录路径（如果未指定，将优先在data_dir/rMSA目录中查找，然后尝试msa和alignments子目录）")
+                       help="MSA文件目录路径")
     
     # 设备参数
     parser.add_argument("--device", default="auto",
@@ -720,27 +624,19 @@ def main():
     
     # Amber relaxation参数
     parser.add_argument("--relax_steps", type=int, default=None,
-                       help="Number of steps for Amber relaxation (default: None, no relaxation). "
-                            "If set to a positive value, will perform structure refinement using Amber.")
-    
-    # US-align参数
-    parser.add_argument("--usalign_path", default="./USalign/USalign",
-                       help="US-align可执行文件路径 (用于计算权威指标)")
+                       help="Amber relaxation步数（默认: None，不进行relaxation）")
     
     args = parser.parse_args()
     
     # 设置设备
     if args.device == "auto":
-        if torch.cuda.is_available():
-            args.device = "cuda"
-        else:
-            args.device = "cpu"
+        args.device = "cuda" if torch.cuda.is_available() else "cpu"
     else:
         args.device = get_device(args.device)
     
     # 设置日志
     logger = setup_logging(args.output_dir, args.log_level)
-    logger.info("开始RhoFold模型批量测试")
+    logger.info("开始RhoFold批量推理")
     logger.info(f"设备: {args.device}")
     logger.info(f"数据目录: {args.data_dir}")
     logger.info(f"输出目录: {args.output_dir}")
@@ -757,10 +653,6 @@ def main():
         # 加载验证数据
         valid_loader, sample_names = load_validation_data(args, logger)
         
-        # 创建US-align包装器用于指标计算
-        usalign_wrapper = USalignWrapper(usalign_path=args.usalign_path)
-        logger.info(f"✅ US-align已就绪: {args.usalign_path}")
-        
         # 批量处理
         results = []
         start_time = time.time()
@@ -770,19 +662,18 @@ def main():
             sample_names = sample_names[:args.max_samples]
             logger.info(f"限制处理样本数为: {len(sample_names)}")
         
-        logger.info("开始批量测试...")
+        logger.info("开始批量推理...")
         for i, (batch, sample_name) in enumerate(tqdm(zip(valid_loader, sample_names), 
                                                    total=len(sample_names),
-                                                   desc="测试样本")):
+                                                   desc="处理样本")):
             
-            logger.debug(f"测试样本 {i+1}/{len(sample_names)}: {sample_name}")
+            logger.debug(f"处理样本 {i+1}/{len(sample_names)}: {sample_name}")
             
-            # 计算指标
-            result = compute_metrics_for_sample(
+            # 推理
+            result = inference_sample(
                 model=model,
                 batch=batch,
                 sample_name=sample_name,
-                usalign_wrapper=usalign_wrapper,
                 output_dir=args.output_dir,
                 config=args,
                 logger=logger
@@ -803,40 +694,30 @@ def main():
         
         # 保存结果
         logger.info("保存结果...")
-        json_file, csv_file, detailed_metrics_file, report_file = save_results(results, args.output_dir, logger)
+        json_file, csv_file, report_file = save_results(results, args.output_dir, logger)
         
         # 输出总结
         total_time = time.time() - start_time
         successful_count = len([r for r in results if r['status'] == 'success'])
         failed_count = len([r for r in results if r['status'] == 'failed'])
         
-        logger.info("RhoFold批量测试完成!")
+        logger.info("RhoFold批量推理完成!")
         logger.info(f"总处理时间: {total_time/60:.1f}分钟")
         logger.info(f"成功样本: {successful_count}")
         logger.info(f"失败样本: {failed_count}")
         logger.info(f"成功率: {successful_count/len(results)*100:.2f}%")
         
-        # 计算基本统计
-        successful_results = [r for r in results if r['status'] == 'success']
-        if successful_results:
-            rmsd_values = [r.get('rmsd', float('inf')) for r in successful_results if 'rmsd' in r]
-            if rmsd_values:
-                logger.info(f"RMSD统计:")
-                logger.info(f"  平均值: {np.mean(rmsd_values):.4f}Å")
-                logger.info(f"  中位数: {np.median(rmsd_values):.4f}Å")
-                logger.info(f"  最小值: {np.min(rmsd_values):.4f}Å")
-                logger.info(f"  最大值: {np.max(rmsd_values):.4f}Å")
-        
         logger.info(f"结果文件:")
         logger.info(f"  JSON: {json_file}")
         logger.info(f"  CSV: {csv_file}")
-        logger.info(f"  详细指标: {detailed_metrics_file}")
         logger.info(f"  报告: {report_file}")
         logger.info(f"  PDB文件目录: {Path(args.output_dir) / 'pdb_files'}")
         
     except Exception as e:
-        logger.error(f"RhoFold批量测试失败: {e}")
+        logger.error(f"RhoFold批量推理失败: {e}")
         raise
+
 
 if __name__ == "__main__":
     main()
+

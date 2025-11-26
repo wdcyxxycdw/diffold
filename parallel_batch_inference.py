@@ -110,7 +110,7 @@ def run_parallel_inference(args):
         # 构建命令
         cmd = [
             sys.executable,  # python
-            "batch_inference_metrics.py",
+            "batch_inference.py",  # 使用新的简化推理脚本
             "--data_dir", str(gpu_data_dir),  # 使用GPU专用的数据目录
             "--checkpoint_path", args.checkpoint_path,
             "--rhofold_checkpoint", args.rhofold_checkpoint,
@@ -120,9 +120,7 @@ def run_parallel_inference(args):
             "--max_sequence_length", str(args.max_sequence_length),
             "--num_workers", str(args.num_workers),
             "--num_sampling", str(args.num_sampling),
-            "--selection_strategy", args.selection_strategy,
             "--log_level", args.log_level,
-            "--usalign_path", args.usalign_path,  # US-align路径
         ]
         
         # 添加可选参数
@@ -220,7 +218,7 @@ def merge_results(results: list, output_dir: str):
             continue
         
         # 读取JSON结果
-        json_file = Path(gpu_output_dir) / "batch_inference_results.json"
+        json_file = Path(gpu_output_dir) / "inference_results.json"
         if json_file.exists():
             with open(json_file, 'r') as f:
                 gpu_results = json.load(f)
@@ -257,12 +255,6 @@ def merge_results(results: list, output_dir: str):
     df = pd.DataFrame(all_results)
     df.to_csv(merged_csv, index=False)
     print(f"  CSV: {merged_csv}")
-    
-    # 保存详细指标
-    merged_detailed = output_path / "merged_detailed_metrics.json"
-    with open(merged_detailed, 'w') as f:
-        json.dump(all_detailed_metrics, f, indent=2, default=str)
-    print(f"  详细指标: {merged_detailed}")
     
     # 生成合并报告
     generate_merged_report(all_results, output_path / "merged_report.txt")
@@ -402,13 +394,7 @@ def main():
     
     # 采样参数
     parser.add_argument("--num_sampling", type=int, default=1)
-    parser.add_argument("--selection_strategy", default="rmsd",
-                       choices=['rmsd', 'tm_score', 'lddt', 'clash_score', 'composite'])
     parser.add_argument("--save_all_samples", action="store_true", default=False)
-    
-    # 指标计算参数
-    parser.add_argument("--usalign_path", default="./USalign/USalign",
-                       help="US-align可执行文件路径 (用于计算权威指标)")
     
     # 其他参数
     parser.add_argument("--log_level", default="INFO")
