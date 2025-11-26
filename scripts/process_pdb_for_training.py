@@ -128,8 +128,8 @@ def parse_pdb_file(pdb_file: Path) -> Dict[str, List[str]]:
                 if model_count > 0 and not in_model:
                     continue
                 
-                # 只处理ATOM和HETATM记录
-                if not (line.startswith('ATOM') or line.startswith('HETATM')):
+                # 只处理ATOM记录（排除HETATM，避免提取配体如GTP、ATP等）
+                if not line.startswith('ATOM'):
                     continue
                 
                 # PDB格式解析（固定列宽）
@@ -268,8 +268,8 @@ def process_single_pdb(
     返回:
         Dict: 统计信息 {'chains': N, 'atoms': M}
     """
-    # 获取PDB ID（文件名去除.pdb后缀）
-    pdb_id = pdb_file.stem.lower()
+    # 获取PDB ID（文件名去除.pdb后缀，保持原大小写）
+    pdb_id = pdb_file.stem
     
     logger.info(f"处理: {pdb_file.name}")
     
@@ -282,17 +282,29 @@ def process_single_pdb(
     
     logger.info(f"  找到 {len(chains)} 条RNA链")
     
+    # 过滤掉原子数太少的链
+    valid_chains = {
+        chain_id: atom_lines 
+        for chain_id, atom_lines in chains.items() 
+        if len(atom_lines) >= min_atoms
+    }
+    
+    if not valid_chains:
+        logger.warning(f"  所有链的原子数都太少（< {min_atoms}）")
+        return {'chains': 0, 'atoms': 0}
+    
     # 保存每条链
     total_atoms = 0
     saved_chains = 0
     
-    for chain_id, atom_lines in chains.items():
-        if len(atom_lines) < min_atoms:
-            logger.info(f"  跳过链 {chain_id}: 原子数太少 ({len(atom_lines)} < {min_atoms})")
-            continue
-        
+    for chain_id, atom_lines in valid_chains.items():
         # 生成输出文件名
-        output_file = output_dir / f"{pdb_id}_{chain_id}.pdb"
+        # 如果只有一条有效链，使用 pdbID.pdb 格式
+        # 如果有多条链，使用 pdbID_chainID.pdb 格式
+        if len(valid_chains) == 1:
+            output_file = output_dir / f"{pdb_id}.pdb"
+        else:
+            output_file = output_dir / f"{pdb_id}_{chain_id}.pdb"
         
         # 保存链
         if save_chain(output_file, atom_lines, renumber):
