@@ -110,6 +110,10 @@ def build_msa_online(
     """
     ensure_parent_dir(output_a3m)
 
+    # Disable SSL certificate verification for systems with self-signed certs
+    import ssl
+    ssl._create_default_https_context = ssl._create_unverified_context
+
     # Lazy import to keep offline mode lightweight if Bio is absent
     try:
         from Bio import Entrez
