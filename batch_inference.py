@@ -391,8 +391,8 @@ def main():
                        help="LoRA适配器路径（可选）")
     
     # 数据参数
-    parser.add_argument("--max_sequence_length", type=int, default=256,
-                       help="最大序列长度")
+    parser.add_argument("--max_sequence_length", type=int, default=1024,
+                       help="最大序列长度（用于分配内存，不再限制输入）")
     parser.add_argument("--num_workers", type=int, default=4,
                        help="数据加载器工作进程数")
     parser.add_argument("--use_msa", action="store_true", default=True,

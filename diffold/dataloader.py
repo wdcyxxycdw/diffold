@@ -297,15 +297,17 @@ class RNA3DDataset(Dataset):
         
         logger.info(f"文件统计: PDB {found_pdb}, SEQ {found_seq}, MSA {found_msa}")
         
-        # 过滤过长序列
+        # ✅ 已移除长度限制 - 允许处理任意长度的序列
+        # 只检查序列是否能正确加载
         valid_samples = []
         for sample in self.samples:
             try:
                 seq = self._load_sequence(sample['seq_file'])
-                if len(seq) <= self.max_length:
-                    valid_samples.append(sample)
-                else:
-                    logger.warning(f"序列过长，跳过: {sample['name']} (长度: {len(seq)})")
+                seq_len = len(seq)
+                # 记录序列长度但不过滤
+                if seq_len > self.max_length:
+                    logger.info(f"处理长序列: {sample['name']} (长度: {seq_len} > {self.max_length})")
+                valid_samples.append(sample)
             except Exception as e:
                 logger.warning(f"加载序列失败，跳过: {sample['name']}, 错误: {e}")
         
