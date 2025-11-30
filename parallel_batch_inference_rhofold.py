@@ -322,9 +322,9 @@ def merge_results(results: list, output_dir: str):
     df.to_csv(merged_csv, index=False)
     print(f"  CSV: {merged_csv}")
     
-    # 生成合并报告
-    generate_merged_report(all_results, output_path / "rhofold_merged_report.txt")
-    print(f"  报告: {output_path / 'rhofold_merged_report.txt'}")
+    # 生成推理状态报告
+    generate_merged_report(all_results, output_path / "rhofold_inference_status_report.txt")
+    print(f"  推理状态报告: {output_path / 'rhofold_inference_status_report.txt'}")
     
     # 统计PDB文件
     pdb_count = len(list(merged_pdb_dir.glob("*.pdb")))
@@ -334,78 +334,38 @@ def merge_results(results: list, output_dir: str):
 
 
 def generate_merged_report(results: list, report_file: Path):
-    """生成合并报告"""
-    import numpy as np
-    
+    """生成推理状态报告（仅统计推理成功/失败，不包含评估指标）"""
     successful_results = [r for r in results if r['status'] == 'success']
     failed_results = [r for r in results if r['status'] == 'failed']
     
     with open(report_file, 'w') as f:
-        f.write("RHOfold 并行批量推理合并报告\n")
+        f.write("RHOfold 并行批量推理状态报告\n")
         f.write("=" * 50 + "\n\n")
         
         f.write(f"总样本数: {len(results)}\n")
-        f.write(f"成功样本数: {len(successful_results)}\n")
-        f.write(f"失败样本数: {len(failed_results)}\n")
+        f.write(f"成功推理: {len(successful_results)}\n")
+        f.write(f"失败推理: {len(failed_results)}\n")
         f.write(f"成功率: {len(successful_results)/len(results)*100:.2f}%\n\n")
         
         if successful_results:
-            # RMSD统计
-            rmsd_values = [r.get('rmsd', r.get('avg_rmsd', float('inf'))) for r in successful_results]
-            rmsd_values = [v for v in rmsd_values if v != float('inf')]
-            if rmsd_values:
-                f.write("RMSD统计:\n")
-                f.write(f"  平均值: {np.mean(rmsd_values):.4f}\n")
-                f.write(f"  中位数: {np.median(rmsd_values):.4f}\n")
-                f.write(f"  标准差: {np.std(rmsd_values):.4f}\n")
-                f.write(f"  最小值: {np.min(rmsd_values):.4f}\n")
-                f.write(f"  最大值: {np.max(rmsd_values):.4f}\n\n")
-            
-            # TM-score统计
-            tm_values = [r.get('avg_tm_score') for r in successful_results if 'avg_tm_score' in r]
-            if tm_values:
-                f.write("TM-score统计:\n")
-                f.write(f"  平均值: {np.mean(tm_values):.4f}\n")
-                f.write(f"  中位数: {np.median(tm_values):.4f}\n")
-                f.write(f"  标准差: {np.std(tm_values):.4f}\n")
-                f.write(f"  最小值: {np.min(tm_values):.4f}\n")
-                f.write(f"  最大值: {np.max(tm_values):.4f}\n\n")
-            
-            # lDDT统计
-            lddt_values = [r.get('avg_lddt') for r in successful_results if 'avg_lddt' in r]
-            if lddt_values:
-                f.write("lDDT统计:\n")
-                f.write(f"  平均值: {np.mean(lddt_values):.4f}\n")
-                f.write(f"  中位数: {np.median(lddt_values):.4f}\n")
-                f.write(f"  标准差: {np.std(lddt_values):.4f}\n")
-                f.write(f"  最小值: {np.min(lddt_values):.4f}\n")
-                f.write(f"  最大值: {np.max(lddt_values):.4f}\n\n")
-            
-            # Clash Score统计
-            clash_values = [r.get('avg_clash_score') for r in successful_results if 'avg_clash_score' in r]
-            if clash_values:
-                f.write("Clash Score统计:\n")
-                f.write(f"  平均值: {np.mean(clash_values):.4f}\n")
-                f.write(f"  中位数: {np.median(clash_values):.4f}\n")
-                f.write(f"  标准差: {np.std(clash_values):.4f}\n")
-                f.write(f"  最小值: {np.min(clash_values):.4f}\n")
-                f.write(f"  最大值: {np.max(clash_values):.4f}\n\n")
-            
-            # GDT-TS统计
-            gdt_values = [r.get('gdt_ts') for r in successful_results if 'gdt_ts' in r and r.get('gdt_ts', 0) > 0]
-            if gdt_values:
-                f.write("GDT-TS统计:\n")
-                f.write(f"  平均值: {np.mean(gdt_values):.4f}\n")
-                f.write(f"  中位数: {np.median(gdt_values):.4f}\n")
-                f.write(f"  标准差: {np.std(gdt_values):.4f}\n")
-                f.write(f"  最小值: {np.min(gdt_values):.4f}\n")
-                f.write(f"  最大值: {np.max(gdt_values):.4f}\n\n")
+            f.write(f"成功样本列表 ({len(successful_results)} 个):\n")
+            f.write("-" * 30 + "\n")
+            for result in successful_results:
+                f.write(f"  ✓ {result['sample_name']}\n")
+            f.write("\n")
         
         if failed_results:
-            f.write("失败样本:\n")
+            f.write(f"失败样本列表 ({len(failed_results)} 个):\n")
             f.write("-" * 30 + "\n")
             for result in failed_results:
-                f.write(f"{result['sample_name']}: {result.get('error', 'unknown')}\n")
+                error_msg = result.get('error', 'unknown')
+                f.write(f"  ✗ {result['sample_name']}: {error_msg}\n")
+            f.write("\n")
+        
+        f.write("=" * 50 + "\n")
+        f.write("注意: 此报告仅包含推理状态统计\n")
+        f.write("如需结构评估指标，请使用 evaluate_structures.py 进行评估\n")
+        f.write("=" * 50 + "\n")
 
 
 def main():

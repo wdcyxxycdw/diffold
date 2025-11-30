@@ -126,101 +126,112 @@ class LDDTCalculator:
             return {'error': f'lDDT calculation failed: {str(e)}', 'lddt': 0.0}
 
 
-class ClashScoreCalculator:
+class MolProbityClashCalculator:
     """
-    原子冲突分数计算器
-    检测非成键原子间的空间冲突
+    使用 MolProbity probe 工具计算 Clash Score
+    更准确，使用正确的范德华半径和overlap标准
     """
     
-    def __init__(self, clash_threshold: float = 2.0):
+    def __init__(self, probe_path: str = "./tools/probe", overlap_cutoff: float = 0.4):
         """
         Args:
-            clash_threshold: 非成键原子的最小允许距离 (Å)
+            probe_path: probe 工具路径
+            overlap_cutoff: overlap 阈值 (Å)，通常 0.4 表示严重 clash
         """
-        self.clash_threshold = clash_threshold
-        self.parser = PDBParser(QUIET=True)
-    
-    def _are_bonded(self, atom1, atom2) -> bool:
-        """判断两个原子是否可能成键（简化判断）"""
-        res1 = atom1.get_parent().get_id()[1]
-        res2 = atom2.get_parent().get_id()[1]
-        # 同一残基或相邻残基认为可能成键
-        return abs(res1 - res2) <= 1
+        self.probe_path = probe_path
+        self.overlap_cutoff = overlap_cutoff
+        
+        if not Path(probe_path).exists():
+            raise FileNotFoundError(f"Probe tool not found: {probe_path}")
     
     def calculate(self, pred_pdb: str) -> Dict:
-        """计算 Clash score"""
+        """使用 MolProbity probe 计算 Clash score"""
         try:
-            structure = self.parser.get_structure("pred", pred_pdb)
-            atoms = list(structure.get_atoms())
+            # 运行 probe 工具
+            cmd = [
+                self.probe_path,
+                "-q",           # quiet mode
+                "-u",           # unformatted output
+                "-mc",          # main chain
+                "-self",        # self contacts
+                "all",          # all atoms
+                pred_pdb
+            ]
             
-            if len(atoms) < 2:
-                return {'error': 'Too few atoms', 'clash_score': 0.0}
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
             
-            # 构建邻居搜索
-            ns = NeighborSearch(atoms)
+            # probe 可能返回多种 returncode，我们只检查是否有输出
+            # returncode 0 = 正常, 141 = SIGPIPE (正常), 其他 = 可能也正常
+            output = result.stdout
             
-            clashes = 0
-            total_pairs = 0
-            clash_details = []
+            # 如果没有输出，才认为失败
+            if not output or len(output) < 10:
+                return {
+                    'error': f"Probe returned no output (returncode: {result.returncode})",
+                    'clash_score': 0.0
+                }
             
-            checked_pairs = set()
+            # 解析 probe 输出
+            # 格式: :1->1:wc: A   1   U  C2' : A   1   U  C2  :overlap:gap:...
+            # parts[0]="", parts[1]="1->1", parts[2]="wc", parts[3]=atom1, parts[4]=atom2
+            # parts[5]=overlap, parts[6]=gap
+            total_contacts = 0
+            bad_clashes = 0  # overlap > cutoff
             
-            for atom in atoms:
-                # 找到距离小于 clash_threshold 的原子
-                neighbors = ns.search(atom.coord, self.clash_threshold, level='A')
+            for line in output.split('\n'):
+                if not line.strip() or not line.startswith(':'):
+                    continue
                 
-                for neighbor in neighbors:
-                    if neighbor == atom:
-                        continue
+                parts = line.split(':')
+                if len(parts) < 7:  # 至少需要7个字段才能获取 overlap
+                    continue
+                
+                try:
+                    # overlap 值在第6个位置（0-indexed，parts[5]实际是第6个字段）
+                    overlap = float(parts[5])
+                    total_contacts += 1
                     
-                    # 避免重复检查
-                    pair = tuple(sorted([id(atom), id(neighbor)]))
-                    if pair in checked_pairs:
-                        continue
-                    checked_pairs.add(pair)
-                    
-                    # 检查是否是成键原子
-                    if self._are_bonded(atom, neighbor):
-                        continue
-                    
-                    total_pairs += 1
-                    distance = atom - neighbor
-                    
-                    if distance < self.clash_threshold:
-                        clashes += 1
-                        if len(clash_details) < 10:  # 只保存前10个
-                            clash_details.append({
-                                'atom1': f"{atom.get_parent().get_id()[1]}:{atom.get_name()}",
-                                'atom2': f"{neighbor.get_parent().get_id()[1]}:{neighbor.get_name()}",
-                                'distance': float(distance)
-                            })
+                    if overlap > self.overlap_cutoff:
+                        bad_clashes += 1
+                except (ValueError, IndexError):
+                    continue
             
-            clash_score = clashes / max(total_pairs, 1) if total_pairs > 0 else 0.0
+            # Clash score = 严重冲突数 / 每1000个原子
+            # 这是 MolProbity 的标准定义
+            # 但我们这里简化为：bad_clashes / total_contacts
+            if total_contacts > 0:
+                clash_score = bad_clashes / total_contacts
+            else:
+                clash_score = 0.0
             
             return {
                 'clash_score': clash_score,
-                'num_clashes': clashes,
-                'total_pairs': total_pairs,
-                'clash_details': clash_details[:10]  # 只保存前10个
+                'num_clashes': bad_clashes,
+                'total_contacts': total_contacts
             }
             
+        except subprocess.TimeoutExpired:
+            return {'error': 'Probe timeout (>60s)', 'clash_score': 0.0}
         except Exception as e:
-            return {'error': f'Clash calculation failed: {str(e)}', 'clash_score': 0.0}
+            return {'error': f'Probe calculation failed: {str(e)}', 'clash_score': 0.0}
 
 
 class USalignWrapper:
-    """US-align包装器 - 使用权威工具计算 RMSD, TM-score, GDT-TS"""
+    """US-align包装器 - 计算 RMSD, TM-score"""
     
-    def __init__(self, usalign_path: str = "./USalign/USalign"):
+    def __init__(self, usalign_path: str = "./tools/USalign"):
         self.usalign_path = usalign_path
         
         # 检查 US-align 是否存在
         if not Path(usalign_path).exists():
             raise FileNotFoundError(
                 f"US-align 未找到: {usalign_path}\n"
-                f"请先编译 US-align:\n"
-                f"  cd USalign\n"
-                f"  g++ -static -O3 -ffast-math -o USalign USalign.cpp"
+                f"请确保工具已正确安装在 tools/ 目录"
             )
     
     def calculate_metrics(self, pred_pdb: str, native_pdb: str) -> Dict:
@@ -244,7 +255,8 @@ class USalignWrapper:
                 pred_pdb,
                 native_pdb,
                 "-mol", "RNA",  # RNA 模式
-                "-ter", "0"     # 不按 TER 记录分割链
+                "-ter", "0",    # 不按 TER 记录分割链
+                "-d", "5.0"     # 设置 d0=5.0 用于 TM-score 归一化
             ]
             
             result = subprocess.run(
@@ -270,10 +282,16 @@ class USalignWrapper:
             if rmsd_match:
                 metrics['rmsd'] = float(rmsd_match.group(1))
             
-            # TM-score (使用第一个，通常是按第一个结构归一化的)
-            tm_matches = re.findall(r'TM-score=\s*([\d.]+)', output)
-            if tm_matches:
-                metrics['tm_score'] = float(tm_matches[0])
+            # TM-score (优先使用 user-specified d0 的值，如果没有则使用第一个)
+            # 查找 user-specified d0 的 TM-score
+            tm_user_match = re.search(r'TM-score=\s*([\d.]+)\s*\(scaled by user-specified d0', output)
+            if tm_user_match:
+                metrics['tm_score'] = float(tm_user_match.group(1))
+            else:
+                # 如果没有 user-specified，则使用第一个（按第一个结构归一化的）
+                tm_matches = re.findall(r'TM-score=\s*([\d.]+)', output)
+                if tm_matches:
+                    metrics['tm_score'] = float(tm_matches[0])
             
             # GDT-TS
             gdt_match = re.search(r'GDT-TS-score=\s*([\d.]+)', output)
@@ -296,6 +314,97 @@ class USalignWrapper:
             
         except subprocess.TimeoutExpired:
             return {'error': 'US-align timeout (>30s)'}
+        except Exception as e:
+            return {'error': f'Exception: {str(e)}'}
+
+
+class TMscoreWrapper:
+    """TMscore包装器 - 计算 GDT-TS, GDT-HA, MaxSub"""
+    
+    def __init__(self, tmscore_path: str = "./tools/TMscore"):
+        self.tmscore_path = tmscore_path
+        
+        # 检查 TMscore 是否存在
+        if not Path(tmscore_path).exists():
+            raise FileNotFoundError(
+                f"TMscore 未找到: {tmscore_path}\n"
+                f"请确保工具已正确安装在 tools/ 目录"
+            )
+    
+    def calculate_metrics(self, pred_pdb: str, native_pdb: str, d0: float = 5.0) -> Dict:
+        """
+        使用 TMscore 计算 GDT-TS, GDT-HA, MaxSub
+        
+        返回格式：
+        {
+            'gdt_ts': float,
+            'gdt_ha': float,
+            'maxsub': float,
+            'gdt_p1': float,  # %(d<1)
+            'gdt_p2': float,  # %(d<2)
+            'gdt_p4': float,  # %(d<4)
+            'gdt_p8': float,  # %(d<8)
+            'raw_output': str
+        }
+        """
+        try:
+            # 运行 TMscore
+            cmd = [
+                self.tmscore_path,
+                pred_pdb,
+                native_pdb,
+                "-d", str(d0)  # 设置 d0
+            ]
+            
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            
+            if result.returncode != 0:
+                return {
+                    'error': f"TMscore failed: {result.stderr}",
+                    'returncode': result.returncode
+                }
+            
+            output = result.stdout
+            
+            # 解析输出
+            metrics = {}
+            
+            # GDT-TS-score= 1.0000 %(d<1)=1.0000 %(d<2)=1.0000 %(d<4)=1.0000 %(d<8)=1.0000
+            gdt_ts_match = re.search(
+                r'GDT-TS-score=\s*([\d.]+)\s+%\(d<1\)=([\d.]+)\s+%\(d<2\)=([\d.]+)\s+%\(d<4\)=([\d.]+)\s+%\(d<8\)=([\d.]+)',
+                output
+            )
+            if gdt_ts_match:
+                metrics['gdt_ts'] = float(gdt_ts_match.group(1))
+                metrics['gdt_p1'] = float(gdt_ts_match.group(2))
+                metrics['gdt_p2'] = float(gdt_ts_match.group(3))
+                metrics['gdt_p4'] = float(gdt_ts_match.group(4))
+                metrics['gdt_p8'] = float(gdt_ts_match.group(5))
+            
+            # GDT-HA-score= 0.9359 %(d<0.5)=0.7436 %(d<1)=1.0000 %(d<2)=1.0000 %(d<4)=1.0000
+            gdt_ha_match = re.search(
+                r'GDT-HA-score=\s*([\d.]+)',
+                output
+            )
+            if gdt_ha_match:
+                metrics['gdt_ha'] = float(gdt_ha_match.group(1))
+            
+            # MaxSub-score= 0.9836  (d0= 3.50)
+            maxsub_match = re.search(r'MaxSub-score=\s*([\d.]+)', output)
+            if maxsub_match:
+                metrics['maxsub'] = float(maxsub_match.group(1))
+            
+            metrics['raw_output'] = output
+            
+            return metrics
+            
+        except subprocess.TimeoutExpired:
+            return {'error': 'TMscore timeout (>30s)'}
         except Exception as e:
             return {'error': f'Exception: {str(e)}'}
 
@@ -385,12 +494,13 @@ def evaluate_structure_pair(sample_name: str,
                            pred_pdb: Path, 
                            native_pdb: Path,
                            usalign_wrapper: USalignWrapper,
+                           tmscore_wrapper: TMscoreWrapper,
                            lddt_calculator: LDDTCalculator,
-                           clash_calculator: ClashScoreCalculator,
+                           clash_calculator,  # MolProbityClashCalculator or None
                            logger: logging.Logger) -> Dict[str, Any]:
     """评估单个结构对"""
     try:
-        # 使用US-align计算指标
+        # 使用US-align计算 RMSD 和 TM-score
         metrics = usalign_wrapper.calculate_metrics(str(pred_pdb), str(native_pdb))
         
         if 'error' in metrics:
@@ -403,6 +513,9 @@ def evaluate_structure_pair(sample_name: str,
                 'native_pdb': str(native_pdb)
             }
         
+        # 使用TMscore计算 GDT-TS, GDT-HA, MaxSub
+        tmscore_metrics = tmscore_wrapper.calculate_metrics(str(pred_pdb), str(native_pdb), d0=5.0)
+        
         # 构建结果
         result = {
             'sample_name': sample_name,
@@ -411,10 +524,21 @@ def evaluate_structure_pair(sample_name: str,
             'native_pdb': str(native_pdb),
             'rmsd': metrics.get('rmsd'),
             'tm_score': metrics.get('tm_score'),
-            'gdt_ts': metrics.get('gdt_ts'),
             'aligned_length': metrics.get('aligned_length'),
             'seq_identity': metrics.get('seq_identity')
         }
+        
+        # 添加TMscore的指标
+        if 'error' not in tmscore_metrics:
+            result['gdt_ts'] = tmscore_metrics.get('gdt_ts')
+            result['gdt_ha'] = tmscore_metrics.get('gdt_ha')
+            result['maxsub'] = tmscore_metrics.get('maxsub')
+            result['gdt_p1'] = tmscore_metrics.get('gdt_p1')
+            result['gdt_p2'] = tmscore_metrics.get('gdt_p2')
+            result['gdt_p4'] = tmscore_metrics.get('gdt_p4')
+            result['gdt_p8'] = tmscore_metrics.get('gdt_p8')
+        else:
+            logger.debug(f"样本 {sample_name}: TMscore计算失败: {tmscore_metrics['error']}")
         
         # 计算lDDT
         lddt_metrics = lddt_calculator.calculate(str(pred_pdb), str(native_pdb))
@@ -425,14 +549,16 @@ def evaluate_structure_pair(sample_name: str,
         else:
             logger.debug(f"样本 {sample_name}: lDDT计算失败: {lddt_metrics['error']}")
         
-        # 计算clash score
-        clash_metrics = clash_calculator.calculate(str(pred_pdb))
-        if 'error' not in clash_metrics:
-            result['clash_score'] = clash_metrics.get('clash_score')
-            result['num_clashes'] = clash_metrics.get('num_clashes')
-            result['total_pairs'] = clash_metrics.get('total_pairs')
-        else:
-            logger.debug(f"样本 {sample_name}: Clash计算失败: {clash_metrics['error']}")
+        # 计算clash score (如果 clash_calculator 可用)
+        if clash_calculator is not None:
+            clash_metrics = clash_calculator.calculate(str(pred_pdb))
+            if 'error' not in clash_metrics:
+                result['clash_score'] = clash_metrics.get('clash_score')
+                result['num_clashes'] = clash_metrics.get('num_clashes')
+                # 使用 MolProbity 的 total_contacts
+                result['total_contacts'] = clash_metrics.get('total_contacts', 0)
+            else:
+                logger.debug(f"样本 {sample_name}: Clash计算失败: {clash_metrics['error']}")
         
         # 构建日志信息
         log_parts = [f"RMSD={result['rmsd']:.4f}", f"TM={result['tm_score']:.4f}"]
@@ -527,6 +653,28 @@ def generate_report(results: List[Dict[str, Any]], report_file: Path, logger: lo
                 f.write(f"  最小值: {np.min(gdt_values):.4f}\n")
                 f.write(f"  最大值: {np.max(gdt_values):.4f}\n\n")
             
+            # GDT-HA统计
+            gdt_ha_values = [r['gdt_ha'] for r in successful_results if r.get('gdt_ha') is not None]
+            if gdt_ha_values:
+                f.write("GDT-HA统计 (High Accuracy):\n")
+                f.write("-" * 40 + "\n")
+                f.write(f"  平均值: {np.mean(gdt_ha_values):.4f}\n")
+                f.write(f"  中位数: {np.median(gdt_ha_values):.4f}\n")
+                f.write(f"  标准差: {np.std(gdt_ha_values):.4f}\n")
+                f.write(f"  最小值: {np.min(gdt_ha_values):.4f}\n")
+                f.write(f"  最大值: {np.max(gdt_ha_values):.4f}\n\n")
+            
+            # MaxSub统计
+            maxsub_values = [r['maxsub'] for r in successful_results if r.get('maxsub') is not None]
+            if maxsub_values:
+                f.write("MaxSub统计:\n")
+                f.write("-" * 40 + "\n")
+                f.write(f"  平均值: {np.mean(maxsub_values):.4f}\n")
+                f.write(f"  中位数: {np.median(maxsub_values):.4f}\n")
+                f.write(f"  标准差: {np.std(maxsub_values):.4f}\n")
+                f.write(f"  最小值: {np.min(maxsub_values):.4f}\n")
+                f.write(f"  最大值: {np.max(maxsub_values):.4f}\n\n")
+            
             # lDDT统计
             lddt_values = [r['lddt'] for r in successful_results if r.get('lddt') is not None]
             if lddt_values:
@@ -599,12 +747,14 @@ def main():
                        help="预测PDB文件目录")
     parser.add_argument("--native_dir", required=True,
                        help="真实PDB文件目录")
-    parser.add_argument("--output_dir", required=True,
-                       help="评估结果输出目录")
+    parser.add_argument("--output_dir", default=None,
+                       help="评估结果输出目录（默认: pred_dir/evaluation_results）")
     
     # 可选参数
-    parser.add_argument("--usalign_path", default="./USalign/USalign",
+    parser.add_argument("--usalign_path", default="./tools/USalign",
                        help="US-align可执行文件路径")
+    parser.add_argument("--tmscore_path", default="./tools/TMscore",
+                       help="TMscore可执行文件路径")
     parser.add_argument("--log_level", default="INFO",
                        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
                        help="日志级别")
@@ -614,7 +764,12 @@ def main():
     # 验证目录存在
     pred_dir = Path(args.pred_dir)
     native_dir = Path(args.native_dir)
-    output_dir = Path(args.output_dir)
+    
+    # 设置输出目录（如果未指定，默认在 pred_dir 下创建 evaluation_results）
+    if args.output_dir is None:
+        output_dir = pred_dir.parent / "evaluation_results"
+    else:
+        output_dir = Path(args.output_dir)
     
     if not pred_dir.exists():
         print(f"❌ 预测目录不存在: {pred_dir}")
@@ -625,7 +780,7 @@ def main():
         return 1
     
     # 设置日志
-    logger = setup_logging(args.output_dir, args.log_level)
+    logger = setup_logging(str(output_dir), args.log_level)
     logger.info("=" * 60)
     logger.info("开始结构评估")
     logger.info("=" * 60)
@@ -639,10 +794,24 @@ def main():
         usalign_wrapper = USalignWrapper(usalign_path=args.usalign_path)
         logger.info(f"✅ US-align已就绪: {args.usalign_path}")
         
-        # 创建lDDT和Clash计算器
+        # 创建TMscore包装器
+        tmscore_wrapper = TMscoreWrapper(tmscore_path=args.tmscore_path)
+        logger.info(f"✅ TMscore已就绪: {args.tmscore_path}")
+        
+        # 创建lDDT计算器
         lddt_calculator = LDDTCalculator()
-        clash_calculator = ClashScoreCalculator()
-        logger.info("✅ lDDT和Clash Score计算器已就绪")
+        logger.info("✅ lDDT计算器已就绪")
+        
+        # 创建Clash计算器（使用 MolProbity probe）
+        probe_path = Path("./tools/probe")
+        if not probe_path.exists():
+            logger.error(f"❌ MolProbity probe 未找到: {probe_path}")
+            logger.error("请确保 probe 工具已安装在 tools/ 目录")
+            logger.warning("⚠️  继续评估但不计算 Clash Score")
+            clash_calculator = None
+        else:
+            clash_calculator = MolProbityClashCalculator(probe_path=str(probe_path))
+            logger.info(f"✅ 使用 MolProbity probe 计算 Clash Score: {probe_path}")
         
         # 查找PDB文件对
         logger.info("\n查找PDB文件对...")
@@ -663,6 +832,7 @@ def main():
                 pred_pdb=pred_pdb,
                 native_pdb=native_pdb,
                 usalign_wrapper=usalign_wrapper,
+                tmscore_wrapper=tmscore_wrapper,
                 lddt_calculator=lddt_calculator,
                 clash_calculator=clash_calculator,
                 logger=logger

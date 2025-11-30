@@ -45,21 +45,19 @@ def load_and_prepare_data(diffold_path, rhofold_path):
     print(f"Available columns in Diffold CSV: {list(diffold_df.columns)}")
     
     # Select appropriate columns for Diffold data
-    # Try 'best_rmsd' first, then 'avg_rmsd', fallback to 'rmsd' if not available
-    if 'best_rmsd' in diffold_df.columns:
-        rmsd_col = 'best_rmsd'
-    elif 'avg_rmsd' in diffold_df.columns:
-        rmsd_col = 'avg_rmsd'
-    else:
-        rmsd_col = 'rmsd'
+    # Try new column names first (rmsd, tm_score), then fallback to old names (avg_*)
+    rmsd_col = 'rmsd' if 'rmsd' in diffold_df.columns else 'avg_rmsd' if 'avg_rmsd' in diffold_df.columns else 'best_rmsd'
+    tm_col = 'tm_score' if 'tm_score' in diffold_df.columns else 'avg_tm_score'
+    lddt_col = 'lddt' if 'lddt' in diffold_df.columns else 'avg_lddt'
+    clash_col = 'clash_score' if 'clash_score' in diffold_df.columns else 'avg_clash_score'
     
-    print(f"Using RMSD column for Diffold: {rmsd_col}")
+    print(f"Using columns for Diffold: RMSD={rmsd_col}, TM-score={tm_col}, lDDT={lddt_col}, Clash={clash_col}")
     
     diffold_data = {
         'rmsd': diffold_df[rmsd_col].values,
-        'tm_score': diffold_df['avg_tm_score'].values,
-        'lddt': diffold_df['avg_lddt'].values,
-        'clash_score': diffold_df['avg_clash_score'].values,
+        'tm_score': diffold_df[tm_col].values,
+        'lddt': diffold_df[lddt_col].values,
+        'clash_score': diffold_df[clash_col].values,
         'sample_name': diffold_df['sample_name'].values,
         'model': ['Diffold'] * len(diffold_df)
     }
@@ -72,30 +70,47 @@ def load_and_prepare_data(diffold_path, rhofold_path):
     print(f"Available columns in RhoFold CSV: {list(rhofold_df.columns)}")
     
     # Select appropriate columns for RhoFold data
-    # Try 'rmsd' first, then 'avg_rmsd'
-    if 'rmsd' in rhofold_df.columns:
-        rmsd_col = 'rmsd'
-    else:
-        rmsd_col = 'avg_rmsd'
+    # Try new column names first (rmsd, tm_score), then fallback to old names (avg_*)
+    rmsd_col = 'rmsd' if 'rmsd' in rhofold_df.columns else 'avg_rmsd'
+    tm_col = 'tm_score' if 'tm_score' in rhofold_df.columns else 'avg_tm_score'
+    lddt_col = 'lddt' if 'lddt' in rhofold_df.columns else 'avg_lddt'
+    clash_col = 'clash_score' if 'clash_score' in rhofold_df.columns else 'avg_clash_score'
     
-    print(f"Using RMSD column for RhoFold: {rmsd_col}")
+    print(f"Using columns for RhoFold: RMSD={rmsd_col}, TM-score={tm_col}, lDDT={lddt_col}, Clash={clash_col}")
     
     rhofold_data = {
         'rmsd': rhofold_df[rmsd_col].values,
-        'tm_score': rhofold_df['avg_tm_score'].values,
-        'lddt': rhofold_df['avg_lddt'].values,
-        'clash_score': rhofold_df['avg_clash_score'].values,
+        'tm_score': rhofold_df[tm_col].values,
+        'lddt': rhofold_df[lddt_col].values,
+        'clash_score': rhofold_df[clash_col].values,
         'sample_name': rhofold_df['sample_name'].values,
         'model': ['Rhofold+(unrelaxed)'] * len(rhofold_df)
     }
     
+    # Check for new metrics (GDT-TS, GDT-HA, MaxSub)
+    new_metrics = ['gdt_ts', 'gdt_ha', 'maxsub']
+    available_new_metrics = []
+    
+    for metric in new_metrics:
+        if metric in diffold_df.columns and metric in rhofold_df.columns:
+            available_new_metrics.append(metric)
+            diffold_data[metric] = diffold_df[metric].values
+            rhofold_data[metric] = rhofold_df[metric].values
+    
     # Combine data
     combined_data = {}
-    for key in ['rmsd', 'tm_score', 'lddt', 'clash_score', 'sample_name']:
-        combined_data[key] = np.concatenate([diffold_data[key], rhofold_data[key]])
+    base_keys = ['rmsd', 'tm_score', 'lddt', 'clash_score', 'sample_name']
+    all_keys = base_keys + available_new_metrics
+    
+    for key in all_keys:
+        if key in diffold_data and key in rhofold_data:
+            combined_data[key] = np.concatenate([diffold_data[key], rhofold_data[key]])
     combined_data['model'] = diffold_data['model'] + rhofold_data['model']
     
     combined_df = pd.DataFrame(combined_data)
+    
+    if available_new_metrics:
+        print(f"Found new metrics: {', '.join(available_new_metrics)}")
     
     print(f"Diffold samples: {len(diffold_df)}")
     print(f"Rhofold+(unrelaxed) samples: {len(rhofold_df)}")
@@ -106,14 +121,26 @@ def load_and_prepare_data(diffold_path, rhofold_path):
 def create_comparison_violin_plots(df, save_path="plots"):
     """Create comparison violin plots"""
     
-    # Metrics information
-    metrics_info = {
+    # Metrics information (all possible metrics)
+    all_metrics_info = {
         'rmsd': {
             'label': 'RMSD (Angstrom)',
             'better': 'lower'
         },
         'tm_score': {
-            'label': 'TM-Score',
+            'label': 'TM-Score (d0=5.0)',
+            'better': 'higher'
+        },
+        'gdt_ts': {
+            'label': 'GDT-TS',
+            'better': 'higher'
+        },
+        'gdt_ha': {
+            'label': 'GDT-HA',
+            'better': 'higher'
+        },
+        'maxsub': {
+            'label': 'MaxSub Score',
             'better': 'higher'
         },
         'lddt': {
@@ -126,11 +153,27 @@ def create_comparison_violin_plots(df, save_path="plots"):
         }
     }
     
+    # Filter to only available metrics
+    metrics_info = {k: v for k, v in all_metrics_info.items() if k in df.columns}
+    
+    num_metrics = len(metrics_info)
+    print(f"Creating comparison plots for {num_metrics} metrics")
+    
     # Create save directory
     Path(save_path).mkdir(parents=True, exist_ok=True)
     
-    # Create 2x2 subplots
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    # Determine subplot layout
+    if num_metrics <= 4:
+        nrows, ncols = 2, 2
+        figsize = (16, 12)
+    elif num_metrics <= 6:
+        nrows, ncols = 2, 3
+        figsize = (20, 12)
+    else:
+        nrows, ncols = 3, 3
+        figsize = (24, 16)
+    
+    fig, axes = plt.subplots(nrows, ncols, figsize=figsize)
     axes = axes.flatten()
     
     for i, (metric, info) in enumerate(metrics_info.items()):
@@ -191,20 +234,38 @@ def create_comparison_violin_plots(df, save_path="plots"):
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
     
+    # Hide unused subplots
+    for idx in range(len(metrics_info), len(axes)):
+        axes[idx].set_visible(False)
+    
     plt.tight_layout()
     plt.savefig(f'{save_path}/model_comparison_violin_plots.png', dpi=300, bbox_inches='tight')
-    plt.show()
+    print(f"   Saved: {save_path}/model_comparison_violin_plots.png")
+    plt.close()
 
 def create_individual_comparison_plots(df, save_path="plots"):
     """Create individual comparison plots for each metric"""
     
-    metrics_info = {
+    # All possible metrics
+    all_metrics_info = {
         'rmsd': {
             'label': 'RMSD (Angstrom)', 
             'better': 'lower'
         },
         'tm_score': {
-            'label': 'TM-Score', 
+            'label': 'TM-Score (d0=5.0)', 
+            'better': 'higher'
+        },
+        'gdt_ts': {
+            'label': 'GDT-TS',
+            'better': 'higher'
+        },
+        'gdt_ha': {
+            'label': 'GDT-HA',
+            'better': 'higher'
+        },
+        'maxsub': {
+            'label': 'MaxSub Score',
             'better': 'higher'
         },
         'lddt': {
@@ -216,6 +277,9 @@ def create_individual_comparison_plots(df, save_path="plots"):
             'better': 'lower'
         }
     }
+    
+    # Filter to only available metrics
+    metrics_info = {k: v for k, v in all_metrics_info.items() if k in df.columns}
     
     Path(save_path).mkdir(parents=True, exist_ok=True)
     
@@ -282,18 +346,36 @@ def create_individual_comparison_plots(df, save_path="plots"):
         plt.tight_layout()
         plt.savefig(filename, dpi=300, bbox_inches='tight', facecolor='white')
         print(f"   Saved: {filename}")
-        plt.show()
+        plt.close()
 
 def generate_summary_statistics(df):
     """Generate comparison statistics summary"""
     
-    print("\n" + "="*60)
+    print("\n" + "="*70)
     print("      DIFFOLD vs RHOFOLD+(UNRELAXED) PERFORMANCE COMPARISON")
-    print("="*60)
+    print("="*70)
     
-    metrics = ['rmsd', 'tm_score', 'lddt', 'clash_score']
-    metric_names = ['RMSD (Angstrom)', 'TM-Score', 'lDDT Score', 'Clash Score']
-    better_direction = ['lower', 'higher', 'higher', 'lower']
+    # All possible metrics
+    all_metrics = {
+        'rmsd': ('RMSD (Angstrom)', 'lower'),
+        'tm_score': ('TM-Score (d0=5.0)', 'higher'),
+        'gdt_ts': ('GDT-TS', 'higher'),
+        'gdt_ha': ('GDT-HA', 'higher'),
+        'maxsub': ('MaxSub Score', 'higher'),
+        'lddt': ('lDDT Score', 'higher'),
+        'clash_score': ('Clash Score', 'lower')
+    }
+    
+    # Filter to available metrics
+    metrics = []
+    metric_names = []
+    better_direction = []
+    
+    for metric, (name, direction) in all_metrics.items():
+        if metric in df.columns:
+            metrics.append(metric)
+            metric_names.append(name)
+            better_direction.append(direction)
     
     for metric, name, direction in zip(metrics, metric_names, better_direction):
         diffold_values = df[df['model'] == 'Diffold'][metric].dropna()
@@ -319,25 +401,25 @@ def generate_summary_statistics(df):
 def main():
     """Main function"""
     parser = argparse.ArgumentParser(
-        description='Compare Diffold and RhoFold+ performance on CASP16 dataset'
+        description='Compare Diffold and RhoFold+ performance on RNA benchmark dataset'
     )
     parser.add_argument(
         '--diffold-path',
         type=str,
-        default='casp16_eval_results/merged_results.csv',
-        help='Path to Diffold results CSV file (default: casp16_eval_results/merged_results.csv)'
+        default='results/single_diffold_output/evaluation_results.csv',
+        help='Path to Diffold evaluation results CSV file'
     )
     parser.add_argument(
         '--rhofold-path',
         type=str,
-        default='casp16_rhofold_parallel_output/rhofold_merged_results.csv',
-        help='Path to RhoFold results CSV file (default: casp16_rhofold_parallel_output/rhofold_merged_results.csv)'
+        default='results/single_rhofold_output/evaluation_results/evaluation_results.csv',
+        help='Path to RhoFold evaluation results CSV file'
     )
     parser.add_argument(
         '--output-dir',
         type=str,
-        default='comparison_plots',
-        help='Directory to save output plots (default: comparison_plots)'
+        default='results/model_comparison_plots',
+        help='Directory to save output plots (default: results/model_comparison_plots)'
     )
     
     args = parser.parse_args()
@@ -365,11 +447,14 @@ def main():
     
     print("\n✅ Comparison analysis completed!")
     print(f"📁 Generated image files in '{args.output_dir}/':")
-    print("   • model_comparison_violin_plots.png - Comprehensive comparison")
-    print("   • rmsd_comparison.png - RMSD comparison")
-    print("   • tm_score_comparison.png - TM-Score comparison")
-    print("   • lddt_comparison.png - lDDT comparison")
-    print("   • clash_score_comparison.png - Clash Score comparison")
+    print("   • model_comparison_violin_plots.png - Comprehensive comparison (all metrics)")
+    
+    # List all generated individual comparison plots
+    available_metrics = [col for col in df.columns if col in [
+        'rmsd', 'tm_score', 'gdt_ts', 'gdt_ha', 'maxsub', 'lddt', 'clash_score'
+    ]]
+    for metric in available_metrics:
+        print(f"   • {metric}_comparison.png")
 
 if __name__ == "__main__":
     main()
