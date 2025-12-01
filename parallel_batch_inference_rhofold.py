@@ -298,7 +298,11 @@ def merge_results(results: list, output_dir: str):
                 all_detailed_metrics.update(gpu_detailed)
         
         # 复制PDB文件到合并目录
-        gpu_pdb_dir = Path(gpu_output_dir) / "rhofold_pdb_files"
+        # 尝试两个可能的目录名（兼容不同版本）
+        gpu_pdb_dir = Path(gpu_output_dir) / "pdb_files"
+        if not gpu_pdb_dir.exists():
+            gpu_pdb_dir = Path(gpu_output_dir) / "rhofold_pdb_files"
+        
         if gpu_pdb_dir.exists():
             for pdb_file in gpu_pdb_dir.glob("*.pdb"):
                 # 复制PDB文件

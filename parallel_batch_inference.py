@@ -120,12 +120,16 @@ def run_parallel_inference(args):
             "--max_sequence_length", str(args.max_sequence_length),
             "--num_workers", str(args.num_workers),
             "--num_sampling", str(args.num_sampling),
+            "--sampling_strategy", args.sampling_strategy,
             "--log_level", args.log_level,
         ]
         
         # 添加可选参数
         if args.lora_path:
             cmd.extend(["--lora_path", args.lora_path])
+        
+        if args.usalign_path:
+            cmd.extend(["--usalign_path", args.usalign_path])
         
         if args.save_all_samples:
             cmd.append("--save_all_samples")
@@ -353,8 +357,15 @@ def main():
     parser.add_argument("--use_msa", action="store_true", default=True)
     
     # 采样参数
-    parser.add_argument("--num_sampling", type=int, default=1)
-    parser.add_argument("--save_all_samples", action="store_true", default=False)
+    parser.add_argument("--num_sampling", type=int, default=1,
+                       help="每个样本的采样次数")
+    parser.add_argument("--save_all_samples", action="store_true", default=False,
+                       help="是否保存所有采样结果")
+    parser.add_argument("--sampling_strategy", type=str, default="first",
+                       choices=['first', 'last', 'random', 'max_confidence', 'median', 'min_rmsd', 'max_tmscore'],
+                       help="采样选择策略: first(默认), last, random, max_confidence, median, min_rmsd, max_tmscore")
+    parser.add_argument("--usalign_path", type=str, default=None,
+                       help="USalign可执行文件路径（用于min_rmsd和max_tmscore策略）")
     
     # 其他参数
     parser.add_argument("--log_level", default="INFO")

@@ -167,6 +167,162 @@ def load_validation_data(config: argparse.Namespace, logger: logging.Logger):
     return valid_loader, sample_names
 
 
+def select_best_sample_by_usalign(samples: List[Dict], sample_name: str, native_pdb_path: str, 
+                                   temp_dir: str, sequence: str, usalign_path: str, 
+                                   strategy: str, logger: logging.Logger) -> Dict:
+    """
+    使用USalign根据RMSD或TM-score选择最佳采样
+    
+    Args:
+        samples: 采样结果列表
+        sample_name: 样本名称
+        native_pdb_path: 真实结构PDB路径
+        temp_dir: 临时文件目录
+        sequence: 序列
+        usalign_path: USalign可执行文件路径
+        strategy: 'min_rmsd' 或 'max_tmscore'
+        logger: 日志器
+    """
+    import subprocess
+    import re
+    from diffold.output import diffold_coords_to_pdb
+    
+    temp_path = Path(temp_dir)
+    temp_path.mkdir(parents=True, exist_ok=True)
+    
+    best_sample = None
+    best_score = float('inf') if strategy == 'min_rmsd' else float('-inf')
+    
+    logger.debug(f"样本 {sample_name}: 使用USalign选择最佳采样（策略: {strategy}）")
+    
+    for i, sample in enumerate(samples):
+        # 保存临时PDB文件
+        temp_pdb = temp_path / f"{sample_name}_temp_{i}.pdb"
+        try:
+            diffold_coords_to_pdb(
+                predicted_coords=sample['predicted_coords'],
+                sequence=sequence,
+                output_path=str(temp_pdb),
+                atom_mask=sample['atom_mask'],
+                logger_instance=logger
+            )
+            
+            # 运行USalign
+            cmd = [usalign_path, str(temp_pdb), native_pdb_path, "-outfmt", "2"]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            
+            if result.returncode == 0:
+                output = result.stdout
+                
+                # 解析RMSD和TM-score
+                rmsd_match = re.search(r'RMSD=\s*([\d.]+)', output)
+                tm_match = re.search(r'TM-score=\s*([\d.]+)', output)
+                
+                if strategy == 'min_rmsd' and rmsd_match:
+                    rmsd = float(rmsd_match.group(1))
+                    sample['selection_score'] = rmsd
+                    logger.debug(f"  采样 {i}: RMSD={rmsd:.4f}")
+                    
+                    if rmsd < best_score:
+                        best_score = rmsd
+                        best_sample = sample
+                
+                elif strategy == 'max_tmscore' and tm_match:
+                    tm_score = float(tm_match.group(1))
+                    sample['selection_score'] = tm_score
+                    logger.debug(f"  采样 {i}: TM-score={tm_score:.4f}")
+                    
+                    if tm_score > best_score:
+                        best_score = tm_score
+                        best_sample = sample
+            
+            # 清理临时文件
+            temp_pdb.unlink(missing_ok=True)
+            
+        except Exception as e:
+            logger.warning(f"  采样 {i} 评估失败: {e}")
+            temp_pdb.unlink(missing_ok=True)
+            continue
+    
+    if best_sample is None:
+        logger.warning(f"样本 {sample_name}: USalign评估失败，使用第一个采样")
+        return samples[0]
+    
+    logger.info(f"样本 {sample_name}: 最佳采样 - {strategy}={best_score:.4f}")
+    return best_sample
+
+
+def select_best_sample(samples: List[Dict], strategy: str, sample_name: str = None,
+                       native_pdb_path: str = None, temp_dir: str = None, 
+                       sequence: str = None, usalign_path: str = None,
+                       logger: logging.Logger = None) -> Dict:
+    """
+    根据策略选择最佳采样
+    
+    策略选项:
+    - 'first': 使用第一个采样（默认，最快）
+    - 'last': 使用最后一个采样
+    - 'random': 随机选择一个采样
+    - 'max_confidence': 选择置信度（pLDDT）最高的采样
+    - 'median': 使用中位数采样
+    - 'min_rmsd': 选择RMSD最小的采样（需要真实结构，使用USalign）
+    - 'max_tmscore': 选择TM-score最高的采样（需要真实结构，使用USalign）
+    """
+    if not samples:
+        return None
+    
+    if strategy == 'first':
+        return samples[0]
+    
+    elif strategy == 'last':
+        return samples[-1]
+    
+    elif strategy == 'random':
+        import random
+        return random.choice(samples)
+    
+    elif strategy == 'max_confidence':
+        # 选择pLDDT最高的采样
+        samples_with_plddt = [s for s in samples if s.get('plddt') is not None]
+        if not samples_with_plddt:
+            if logger:
+                logger.warning("没有置信度信息，回退到使用第一个采样")
+            return samples[0]
+        
+        # 计算每个采样的平均pLDDT
+        best_sample = max(samples_with_plddt, key=lambda s: torch.mean(s['plddt']).item())
+        if logger:
+            logger.debug(f"选择置信度最高的采样: pLDDT={torch.mean(best_sample['plddt']).item():.4f}")
+        return best_sample
+    
+    elif strategy == 'median':
+        # 使用中位数位置的采样
+        median_idx = len(samples) // 2
+        return samples[median_idx]
+    
+    elif strategy in ['min_rmsd', 'max_tmscore']:
+        # 基于USalign的选择策略
+        if not all([native_pdb_path, temp_dir, sequence, usalign_path]):
+            if logger:
+                logger.warning(f"策略 '{strategy}' 需要真实结构路径等参数，回退到第一个采样")
+            return samples[0]
+        
+        if not Path(native_pdb_path).exists():
+            if logger:
+                logger.warning(f"真实结构不存在: {native_pdb_path}，回退到第一个采样")
+            return samples[0]
+        
+        return select_best_sample_by_usalign(
+            samples, sample_name, native_pdb_path, temp_dir, 
+            sequence, usalign_path, strategy, logger
+        )
+    
+    else:
+        if logger:
+            logger.warning(f"未知的采样策略 '{strategy}'，使用第一个采样")
+        return samples[0]
+
+
 def inference_sample(model: Diffold, 
                      batch: Dict[str, torch.Tensor], 
                      sample_name: str,
@@ -174,8 +330,10 @@ def inference_sample(model: Diffold,
                      output_dir: str,
                      num_sampling: int,
                      save_all_samples: bool,
-                     logger: logging.Logger) -> Dict[str, Any]:
-    """对单个样本进行推理并保存PDB文件（支持多次采样）"""
+                     logger: logging.Logger,
+                     sampling_strategy: str = 'first',
+                     usalign_path: str = None) -> Dict[str, Any]:
+    """对单个样本进行推理并保存PDB文件（支持多次采样和选择策略）"""
     try:
         # 准备输入数据
         device = next(model.parameters()).device
@@ -221,9 +379,10 @@ def inference_sample(model: Diffold,
                 logger.warning(f"样本 {sample_name} 采样 {sample_idx+1}: 模型推理返回None")
                 continue
             
-            # 提取预测坐标
+            # 提取预测坐标和置信度信息
             predicted_coords = result.get('predicted_coords')
             atom_mask = result.get('atom_mask', None)
+            plddt = result.get('plddt', None)  # 置信度分数
             
             if predicted_coords is None:
                 logger.warning(f"样本 {sample_name} 采样 {sample_idx+1}: 未获取到预测坐标")
@@ -233,7 +392,8 @@ def inference_sample(model: Diffold,
             sample_result = {
                 'sample_idx': sample_idx,
                 'predicted_coords': predicted_coords,
-                'atom_mask': atom_mask
+                'atom_mask': atom_mask,
+                'plddt': plddt
             }
             all_samples.append(sample_result)
         
@@ -251,8 +411,20 @@ def inference_sample(model: Diffold,
         
         pdb_file_paths = []
         
-        # 保存最佳采样（默认第一个）
-        best_sample = all_samples[0]
+        # 根据策略选择最佳采样
+        native_pdb_path = Path(data_dir) / "pdb" / f"{sample_name}.pdb"
+        temp_dir = Path(output_dir) / "temp"
+        
+        best_sample = select_best_sample(
+            samples=all_samples,
+            strategy=sampling_strategy,
+            sample_name=sample_name,
+            native_pdb_path=str(native_pdb_path) if native_pdb_path.exists() else None,
+            temp_dir=str(temp_dir),
+            sequence=sequence,
+            usalign_path=usalign_path,
+            logger=logger
+        )
         best_pdb_path = pdb_output_dir / f"{sample_name}.pdb"
         try:
             diffold_coords_to_pdb(
@@ -412,6 +584,13 @@ def main():
     parser.add_argument("--save_all_samples", action="store_true", default=False,
                        help="是否保存所有采样结果")
     
+    # 采样选择策略参数
+    parser.add_argument("--sampling_strategy", type=str, default="first",
+                       choices=['first', 'last', 'random', 'max_confidence', 'median', 'min_rmsd', 'max_tmscore'],
+                       help="采样选择策略: first(默认), last, random, max_confidence, median, min_rmsd, max_tmscore")
+    parser.add_argument("--usalign_path", type=str, default="./tools/USalign",
+                       help="USalign可执行文件路径（用于min_rmsd和max_tmscore策略）")
+    
     args = parser.parse_args()
     
     # 验证参数
@@ -444,6 +623,9 @@ def main():
     if args.lora_path:
         logger.info(f"LoRA适配器: {args.lora_path}")
     logger.info(f"每样本采样次数: {args.num_sampling}")
+    logger.info(f"采样选择策略: {args.sampling_strategy}")
+    if args.sampling_strategy in ['min_rmsd', 'max_tmscore']:
+        logger.info(f"USalign路径: {args.usalign_path}")
     logger.info(f"保存所有采样结果: {args.save_all_samples}")
     logger.info("=" * 60)
     
@@ -487,7 +669,9 @@ def main():
                 output_dir=args.output_dir,
                 num_sampling=args.num_sampling,
                 save_all_samples=args.save_all_samples,
-                logger=logger
+                logger=logger,
+                sampling_strategy=args.sampling_strategy,
+                usalign_path=args.usalign_path
             )
             
             results.append(result)

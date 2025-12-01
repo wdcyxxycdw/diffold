@@ -258,7 +258,8 @@ def inference_sample(model: RhoFold,
                     sample_name: str,
                     output_dir: str,
                     config: argparse.Namespace,
-                    logger: logging.Logger) -> Dict[str, Any]:
+                    logger: logging.Logger,
+                    usalign_wrapper: Optional[USalignWrapper] = None) -> Dict[str, Any]:
     """对单个样本进行推理并保存PDB文件"""
     try:
         # 准备输入数据
@@ -388,9 +389,9 @@ def inference_sample(model: RhoFold,
                     logger.warning(f"样本 {sample_name}: Amber优化失败: {e}")
                     logger.info(f"样本 {sample_name}: 继续使用unrelaxed模型")
         
-        # 使用US-align计算指标
+        # 使用US-align计算指标（如果可用）
         native_pdb_path = Path(config.data_dir) / "pdb" / f"{sample_name}.pdb"
-        if success and native_pdb_path.exists():
+        if success and native_pdb_path.exists() and usalign_wrapper is not None:
             logger.debug(f"样本 {sample_name}: 使用US-align计算指标")
             # 使用最终的PDB（relaxed如果可用，否则unrelaxed）
             final_pdb = relaxed_pdb_path if relaxed_pdb_path else unrelaxed_pdb_path
@@ -676,7 +677,8 @@ def main():
                 sample_name=sample_name,
                 output_dir=args.output_dir,
                 config=args,
-                logger=logger
+                logger=logger,
+                usalign_wrapper=None  # 不在推理时计算指标，使用单独的评估脚本
             )
             
             results.append(result)
