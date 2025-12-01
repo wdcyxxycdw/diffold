@@ -348,6 +348,198 @@ def create_individual_comparison_plots(df, save_path="plots"):
         print(f"   Saved: {filename}")
         plt.close()
 
+def create_box_plot_comparison(df, save_path="plots"):
+    """Create box plot comparison (论文标准格式)"""
+    
+    # All possible metrics
+    all_metrics_info = {
+        'rmsd': {
+            'label': 'RMSD',
+            'unit': 'Å',
+            'better': 'lower'
+        },
+        'tm_score': {
+            'label': 'TM-Score',
+            'unit': '',
+            'better': 'higher'
+        },
+        'gdt_ts': {
+            'label': 'GDT-TS',
+            'unit': '',
+            'better': 'higher'
+        },
+        'gdt_ha': {
+            'label': 'GDT-HA',
+            'unit': '',
+            'better': 'higher'
+        },
+        'maxsub': {
+            'label': 'MaxSub',
+            'unit': '',
+            'better': 'higher'
+        },
+        'lddt': {
+            'label': 'lDDT',
+            'unit': '',
+            'better': 'higher'
+        },
+        'clash_score': {
+            'label': 'Clash Score',
+            'unit': '',
+            'better': 'lower'
+        }
+    }
+    
+    # Filter to only available metrics
+    metrics_info = {k: v for k, v in all_metrics_info.items() if k in df.columns}
+    
+    num_metrics = len(metrics_info)
+    print(f"Creating box plot for {num_metrics} metrics")
+    
+    Path(save_path).mkdir(parents=True, exist_ok=True)
+    
+    # Determine subplot layout
+    if num_metrics <= 4:
+        nrows, ncols = 2, 2
+        figsize = (16, 12)
+    elif num_metrics <= 6:
+        nrows, ncols = 2, 3
+        figsize = (20, 12)
+    else:
+        nrows, ncols = 3, 3
+        figsize = (24, 16)
+    
+    fig, axes = plt.subplots(nrows, ncols, figsize=figsize)
+    axes = axes.flatten()
+    
+    for i, (metric, info) in enumerate(metrics_info.items()):
+        ax = axes[i]
+        
+        # Prepare data for box plot
+        data_to_plot = [
+            df[df['model'] == 'Diffold'][metric].dropna(),
+            df[df['model'] == 'Rhofold+(unrelaxed)'][metric].dropna()
+        ]
+        
+        # Create box plot
+        bp = ax.boxplot(data_to_plot, 
+                       labels=['Diffold', 'RhoFold+'],
+                       patch_artist=True,
+                       widths=0.6,
+                       showfliers=True,
+                       flierprops=dict(marker='o', markerfacecolor='red', markersize=6, 
+                                      linestyle='none', markeredgecolor='darkred', alpha=0.6))
+        
+        # Set colors using unified color scheme
+        colors = [MODEL_COLORS['Diffold']['violin'], MODEL_COLORS['Rhofold+(unrelaxed)']['violin']]
+        for patch, color in zip(bp['boxes'], colors):
+            patch.set_facecolor(color)
+            patch.set_alpha(0.7)
+            patch.set_edgecolor('black')
+            patch.set_linewidth(1.5)
+        
+        # Style median lines
+        for median in bp['medians']:
+            median.set(color='darkred', linewidth=2.5)
+        
+        # Style whiskers and caps
+        for whisker in bp['whiskers']:
+            whisker.set(color='black', linewidth=1.5, linestyle='-')
+        for cap in bp['caps']:
+            cap.set(color='black', linewidth=1.5)
+        
+        # Set labels and title
+        unit_str = f" ({info['unit']})" if info['unit'] else ""
+        ax.set_ylabel(f'{info["label"]}{unit_str}', fontsize=13, fontweight='bold')
+        ax.set_title(f'{info["label"]}', fontsize=15, fontweight='bold', pad=15)
+        ax.tick_params(axis='both', labelsize=11)
+        ax.grid(True, alpha=0.3, axis='y')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+    
+    # Hide unused subplots
+    for idx in range(len(metrics_info), len(axes)):
+        axes[idx].set_visible(False)
+    
+    plt.tight_layout()
+    plt.savefig(f'{save_path}/model_comparison_box_plots.png', dpi=300, bbox_inches='tight')
+    print(f"   Saved: {save_path}/model_comparison_box_plots.png")
+    plt.close()
+
+def create_individual_box_plots(df, save_path="plots"):
+    """Create individual box plots for each metric (论文标准格式)"""
+    
+    all_metrics_info = {
+        'rmsd': {'label': 'RMSD', 'unit': 'Å', 'better': 'lower'},
+        'tm_score': {'label': 'TM-Score', 'unit': '', 'better': 'higher'},
+        'gdt_ts': {'label': 'GDT-TS', 'unit': '', 'better': 'higher'},
+        'gdt_ha': {'label': 'GDT-HA', 'unit': '', 'better': 'higher'},
+        'maxsub': {'label': 'MaxSub', 'unit': '', 'better': 'higher'},
+        'lddt': {'label': 'lDDT Score', 'unit': '', 'better': 'higher'},
+        'clash_score': {'label': 'Clash Score', 'unit': '', 'better': 'lower'}
+    }
+    
+    metrics_info = {k: v for k, v in all_metrics_info.items() if k in df.columns}
+    Path(save_path).mkdir(parents=True, exist_ok=True)
+    
+    for metric, info in metrics_info.items():
+        fig, ax = plt.subplots(figsize=(8, 6))
+        
+        # Prepare data
+        data_to_plot = [
+            df[df['model'] == 'Diffold'][metric].dropna(),
+            df[df['model'] == 'Rhofold+(unrelaxed)'][metric].dropna()
+        ]
+        
+        # Create box plot
+        bp = ax.boxplot(data_to_plot,
+                       labels=['Diffold', 'RhoFold+'],
+                       patch_artist=True,
+                       widths=0.5,
+                       showfliers=True,
+                       flierprops=dict(marker='o', markerfacecolor='red', markersize=8,
+                                      linestyle='none', markeredgecolor='darkred', alpha=0.7))
+        
+        # Set colors
+        colors = [MODEL_COLORS['Diffold']['violin'], MODEL_COLORS['Rhofold+(unrelaxed)']['violin']]
+        edge_colors = [MODEL_COLORS['Diffold']['edge'], MODEL_COLORS['Rhofold+(unrelaxed)']['edge']]
+        
+        for patch, color, edge_color in zip(bp['boxes'], colors, edge_colors):
+            patch.set_facecolor(color)
+            patch.set_alpha(0.75)
+            patch.set_edgecolor(edge_color)
+            patch.set_linewidth(2)
+        
+        # Style median lines (make them stand out)
+        for median in bp['medians']:
+            median.set(color='darkred', linewidth=3)
+        
+        # Style whiskers and caps
+        for whisker in bp['whiskers']:
+            whisker.set(color='black', linewidth=2, linestyle='-')
+        for cap in bp['caps']:
+            cap.set(color='black', linewidth=2)
+        
+        # Add grid
+        ax.grid(True, alpha=0.3, axis='y', linestyle='--')
+        ax.set_axisbelow(True)
+        
+        # Labels
+        unit_str = f" ({info['unit']})" if info['unit'] else ""
+        ax.set_ylabel(f'{info["label"]}{unit_str}', fontsize=14, fontweight='bold')
+        ax.set_title(f'{info["label"]} Comparison', fontsize=16, fontweight='bold', pad=20)
+        ax.tick_params(axis='both', labelsize=12)
+        
+        # Remove top and right spines
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        
+        plt.tight_layout()
+        filename = f'{save_path}/{metric}_box_plot.png'
+        plt.savefig(filename, dpi=300, bbox_inches='tight', facecolor='white')
+        print(f"   Saved: {filename}")
+        plt.close()
+
 def generate_summary_statistics(df):
     """Generate comparison statistics summary"""
     
@@ -406,20 +598,20 @@ def main():
     parser.add_argument(
         '--diffold-path',
         type=str,
-        default='results/single_diffold_output/evaluation_results.csv',
+        required=True,
         help='Path to Diffold evaluation results CSV file'
     )
     parser.add_argument(
         '--rhofold-path',
         type=str,
-        default='results/single_rhofold_output/evaluation_results/evaluation_results.csv',
+        required=True,
         help='Path to RhoFold evaluation results CSV file'
     )
     parser.add_argument(
         '--output-dir',
         type=str,
-        default='results/model_comparison_plots',
-        help='Directory to save output plots (default: results/model_comparison_plots)'
+        required=True,
+        help='Directory to save output plots'
     )
     
     args = parser.parse_args()
@@ -436,23 +628,35 @@ def main():
     
     print("\nGenerating comparison visualizations...")
     
-    print("1. Creating comprehensive comparison violin plots...")
+    print("1. Creating box plots (论文标准格式)...")
+    create_box_plot_comparison(df, save_path=args.output_dir)
+    
+    print("2. Creating individual box plots...")
+    create_individual_box_plots(df, save_path=args.output_dir)
+    
+    print("3. Creating violin plots (详细分布)...")
     create_comparison_violin_plots(df, save_path=args.output_dir)
     
-    print("2. Creating individual metric comparison plots...")
+    print("4. Creating individual violin plots...")
     create_individual_comparison_plots(df, save_path=args.output_dir)
     
-    print("3. Generating statistical summary...")
+    print("5. Generating statistical summary...")
     generate_summary_statistics(df)
     
     print("\n✅ Comparison analysis completed!")
     print(f"📁 Generated image files in '{args.output_dir}/':")
-    print("   • model_comparison_violin_plots.png - Comprehensive comparison (all metrics)")
     
-    # List all generated individual comparison plots
     available_metrics = [col for col in df.columns if col in [
         'rmsd', 'tm_score', 'gdt_ts', 'gdt_ha', 'maxsub', 'lddt', 'clash_score'
     ]]
+    
+    print("\n  📊 Box Plots (论文标准格式):")
+    print("   • model_comparison_box_plots.png - 综合箱线图 ⭐ 推荐")
+    for metric in available_metrics:
+        print(f"   • {metric}_box_plot.png")
+    
+    print("\n  🎻 Violin Plots (详细分布分析):")
+    print("   • model_comparison_violin_plots.png - 综合小提琴图")
     for metric in available_metrics:
         print(f"   • {metric}_comparison.png")
 

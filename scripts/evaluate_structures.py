@@ -713,20 +713,14 @@ def main():
         description="结构评估脚本 - 比较预测PDB和真实PDB，计算多种评估指标",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-使用示例:
+使用示例（从 rhofold/ 目录运行）:
 
-1. 基本用法:
-   python evaluate_structures.py \\
-       --pred_dir ./output/pdb_files \\
-       --native_dir ./data/pdb \\
-       --output_dir ./evaluation_results
-
-2. 指定US-align路径:
-   python evaluate_structures.py \\
-       --pred_dir ./predictions \\
-       --native_dir ./ground_truth \\
-       --output_dir ./results \\
-       --usalign_path ./USalign/USalign
+python scripts/evaluate_structures.py \\
+    --pred_dir results/single_diffold_output/merged_pdb_files \\
+    --native_dir benchmark_data/RNA-benchmark/single/pdb \\
+    --output_dir results/single_diffold_output/evaluation_results \\
+    --usalign_path tools/USalign \\
+    --tmscore_path tools/TMscore
 
 评估指标:
   - RMSD: 均方根偏差（使用US-align）
@@ -747,13 +741,11 @@ def main():
                        help="预测PDB文件目录")
     parser.add_argument("--native_dir", required=True,
                        help="真实PDB文件目录")
-    parser.add_argument("--output_dir", default=None,
-                       help="评估结果输出目录（默认: pred_dir/evaluation_results）")
-    
-    # 可选参数
-    parser.add_argument("--usalign_path", default="./tools/USalign",
+    parser.add_argument("--output_dir", required=True,
+                       help="评估结果输出目录")
+    parser.add_argument("--usalign_path", default="tools/USalign",
                        help="US-align可执行文件路径")
-    parser.add_argument("--tmscore_path", default="./tools/TMscore",
+    parser.add_argument("--tmscore_path", default="tools/TMscore",
                        help="TMscore可执行文件路径")
     parser.add_argument("--log_level", default="INFO",
                        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
@@ -765,11 +757,8 @@ def main():
     pred_dir = Path(args.pred_dir)
     native_dir = Path(args.native_dir)
     
-    # 设置输出目录（如果未指定，默认在 pred_dir 下创建 evaluation_results）
-    if args.output_dir is None:
-        output_dir = pred_dir.parent / "evaluation_results"
-    else:
-        output_dir = Path(args.output_dir)
+    # 设置输出目录
+    output_dir = Path(args.output_dir)
     
     if not pred_dir.exists():
         print(f"❌ 预测目录不存在: {pred_dir}")
@@ -803,10 +792,20 @@ def main():
         logger.info("✅ lDDT计算器已就绪")
         
         # 创建Clash计算器（使用 MolProbity probe）
-        probe_path = Path("./tools/probe")
-        if not probe_path.exists():
+        # 检查是否提供了 probe_path 参数
+        if hasattr(args, 'probe_path') and args.probe_path:
+            probe_path = Path(args.probe_path)
+        else:
+            # 尝试默认位置
+            probe_path = None
+            for possible_path in ["tools/probe", "../tools/probe", "./tools/probe"]:
+                if Path(possible_path).exists():
+                    probe_path = Path(possible_path)
+                    break
+        
+        if probe_path and not probe_path.exists():
             logger.error(f"❌ MolProbity probe 未找到: {probe_path}")
-            logger.error("请确保 probe 工具已安装在 tools/ 目录")
+            logger.error("请确保 probe 工具已安装或使用 --probe_path 参数指定路径")
             logger.warning("⚠️  继续评估但不计算 Clash Score")
             clash_calculator = None
         else:
