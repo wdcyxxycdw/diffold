@@ -14,8 +14,11 @@ import warnings
 warnings.filterwarnings('ignore')
 
 import os
-SAVE_PATH = "/work/gs58/s58009/rhofold/plots/casp15_ft2"
-LOAD_PATH = "/work/gs58/s58009/archive/ft2/casp15_eval_results/merged_results.csv"
+import argparse
+
+# 默认路径（可通过命令行参数覆盖）
+SAVE_PATH = "/work/gs58/s58009/rhofold/plots/visualization"
+LOAD_PATH = "/work/gs58/s58009/rhofold/results/diffold_casp16/evaluation_results/evaluation_results.csv"
 
 # 设置字体和样式 - 使用英文标签避免字体问题
 plt.rcParams['font.family'] = 'DejaVu Sans'
@@ -37,23 +40,64 @@ def load_and_clean_data(file_path):
     df_success = df[df['status'] == 'success'].copy()
     print(f"用于分析的成功样本数: {len(df_success)}")
     
+    # 适配新旧两种CSV格式的列名
+    # 旧格式: best_rmsd, avg_tm_score, avg_lddt, avg_clash_score
+    # 新格式: rmsd, tm_score, lddt, clash_score
+    column_mapping = {
+        'rmsd': 'best_rmsd',
+        'tm_score': 'avg_tm_score',
+        'lddt': 'avg_lddt',
+        'clash_score': 'avg_clash_score'
+    }
+    
+    # 检查并重命名列
+    for new_col, old_col in column_mapping.items():
+        if new_col in df_success.columns and old_col not in df_success.columns:
+            df_success[old_col] = df_success[new_col]
+            print(f"  映射列: {new_col} -> {old_col}")
+    
+    # 添加 gdt_ts, gdt_ha, maxsub, seq_identity 列（如果不存在，使用相应的新列名）
+    new_to_old_mapping = {
+        'gdt_ts': 'gdt_ts',
+        'gdt_ha': 'gdt_ha', 
+        'maxsub': 'maxsub',
+        'seq_identity': 'seq_identity'
+    }
+    
+    for new_col, expected_col in new_to_old_mapping.items():
+        if expected_col not in df_success.columns and new_col in df.columns:
+            df_success[expected_col] = df[new_col]
+            print(f"  添加列: {new_col}")
+    
     return df, df_success
 
-def plot_metric_distributions(df, figsize=(20, 15)):
+def plot_metric_distributions(df, figsize=(20, 20)):
     """绘制主要指标的分布图（小提琴图 + 箱线图）"""
-    # 主要分析指标 - 使用Diffold的列名
+    # 主要分析指标 - 包含新的评估指标
     metrics = {
         'best_rmsd': 'RMSD (Angstrom)',
         'avg_tm_score': 'TM-Score',
-        'avg_lddt': 'LDDT Score',
+        'gdt_ts': 'GDT-TS',
+        'gdt_ha': 'GDT-HA',
+        'maxsub': 'MaxSub',
+        'avg_lddt': 'lDDT Score',
         'avg_clash_score': 'Clash Score',
-        'sequence_length': 'Sequence Length'
+        'seq_identity': 'Sequence Identity'
     }
     
-    fig, axes = plt.subplots(2, 3, figsize=figsize)
+    # 根据指标数量动态调整子图布局
+    n_metrics = len(metrics)
+    n_cols = 3
+    n_rows = (n_metrics + n_cols - 1) // n_cols
+    
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize)
     axes = axes.flatten()
     
     for i, (metric, label) in enumerate(metrics.items()):
+        if metric not in df.columns:
+            print(f"  警告: 列 '{metric}' 不存在，跳过")
+            continue
+            
         if i < len(axes):
             ax = axes[i]
             
@@ -90,8 +134,8 @@ def plot_metric_distributions(df, figsize=(20, 15)):
             ax.grid(True, alpha=0.3)
     
     # 删除多余的子图
-    if len(metrics) < len(axes):
-        axes[-1].remove()
+    for j in range(i + 1, len(axes)):
+        axes[j].remove()
     
     plt.tight_layout()
     plt.savefig(f'{SAVE_PATH}/metric_distributions.png', dpi=300, bbox_inches='tight')
@@ -99,22 +143,35 @@ def plot_metric_distributions(df, figsize=(20, 15)):
 
 def plot_individual_violin_plots(df):
     """为每个指标单独绘制小提琴图"""
-    # 主要分析指标 - 按性能好坏的方向定义 - 使用Diffold的列名
+    # 主要分析指标 - 按性能好坏的方向定义 - 包含新的评估指标
     metrics_info = {
         'best_rmsd': {'label': 'RMSD (Angstrom)', 'better': 'lower', 'unit': 'Å'},
         'avg_tm_score': {'label': 'TM-Score', 'better': 'higher', 'unit': ''},
-        'avg_lddt': {'label': 'LDDT Score', 'better': 'higher', 'unit': ''},
+        'gdt_ts': {'label': 'GDT-TS', 'better': 'higher', 'unit': ''},
+        'gdt_ha': {'label': 'GDT-HA', 'better': 'higher', 'unit': ''},
+        'maxsub': {'label': 'MaxSub', 'better': 'higher', 'unit': ''},
+        'avg_lddt': {'label': 'lDDT Score', 'better': 'higher', 'unit': ''},
         'avg_clash_score': {'label': 'Clash Score', 'better': 'lower', 'unit': ''},
-        'sequence_length': {'label': 'Sequence Length', 'better': 'neutral', 'unit': 'residues'}
+        'seq_identity': {'label': 'Sequence Identity', 'better': 'higher', 'unit': ''}
     }
     
-    # 颜色调色板
-    colors = ['#e74c3c', '#2ecc71', '#3498db', '#f39c12', '#9b59b6']
+    # 颜色调色板 - 扩展到8种颜色
+    colors = ['#e74c3c', '#2ecc71', '#3498db', '#f39c12', '#9b59b6', '#1abc9c', '#e67e22', '#34495e']
     
     for i, (metric, info) in enumerate(metrics_info.items()):
+        # 检查列是否存在
+        if metric not in df.columns:
+            print(f"  跳过: {info['label']} (列不存在)")
+            continue
+            
         fig, ax = plt.subplots(figsize=(10, 8))
         
         data = df[metric].dropna()
+        
+        if len(data) == 0:
+            print(f"  跳过: {info['label']} (无有效数据)")
+            plt.close(fig)
+            continue
         
         # 对于'better=lower'的指标（RMSD, Clash Score），翻转Y轴让好的值在上方
         if info['better'] == 'lower':
@@ -136,8 +193,9 @@ def plot_individual_violin_plots(df):
                 y_label_suffix = ""
         
         # 设置小提琴图颜色
+        color_idx = i % len(colors)  # 循环使用颜色
         for pc in violin_parts['bodies']:
-            pc.set_facecolor(colors[i])
+            pc.set_facecolor(colors[color_idx])
             pc.set_alpha(0.7)
             pc.set_edgecolor('black')
             pc.set_linewidth(1.5)
@@ -255,11 +313,15 @@ def plot_sequence_length_analysis(df, figsize=(15, 10)):
     plt.savefig(f'{SAVE_PATH}/sequence_length_analysis.png', dpi=300, bbox_inches='tight')
     plt.show()
 
-def plot_correlation_matrix(df, figsize=(12, 10)):
+def plot_correlation_matrix(df, figsize=(14, 12)):
     """绘制指标相关性热力图"""
-    # 选择数值型指标
-    numeric_cols = ['sequence_length', 'best_rmsd', 'avg_tm_score', 'avg_lddt', 'avg_clash_score']
-    correlation_data = df[numeric_cols].corr()
+    # 选择数值型指标 - 包含所有新指标
+    numeric_cols = ['best_rmsd', 'avg_tm_score', 'gdt_ts', 'gdt_ha', 'maxsub', 
+                    'avg_lddt', 'avg_clash_score', 'seq_identity']
+    
+    # 只选择存在的列
+    available_cols = [col for col in numeric_cols if col in df.columns]
+    correlation_data = df[available_cols].corr()
     
     plt.figure(figsize=figsize)
     mask = np.triu(np.ones_like(correlation_data, dtype=bool))
@@ -372,23 +434,52 @@ def plot_performance_summary(df, figsize=(16, 6)):
     axes[0].pie(sizes, labels=labels, colors=colors, autopct='%1.1f%%', startangle=90)
     axes[0].set_title('Overall Success Rate', fontweight='bold')
     
-    # Performance metrics data
-    metrics_means = {
-        'RMSD (norm.)': 1 - (df['best_rmsd'].mean() / df['best_rmsd'].max()),  # 反向归一化，值越大越好
-        'TM-Score': df['avg_tm_score'].mean(),
-        'LDDT': df['avg_lddt'].mean() / 100,  # 归一化到0-1
-        'Clash Score (norm.)': 1 - (df['avg_clash_score'].mean() / df['avg_clash_score'].max())  # 反向归一化
-    }
+    # Performance metrics data - 包含新指标
+    metrics_means = {}
+    
+    # RMSD (越小越好，反向归一化)
+    if 'best_rmsd' in df.columns:
+        metrics_means['RMSD (norm.)'] = 1 - (df['best_rmsd'].mean() / df['best_rmsd'].max())
+    
+    # TM-Score (越大越好)
+    if 'avg_tm_score' in df.columns:
+        metrics_means['TM-Score'] = df['avg_tm_score'].mean()
+    
+    # GDT-TS (越大越好)
+    if 'gdt_ts' in df.columns:
+        metrics_means['GDT-TS'] = df['gdt_ts'].mean()
+    
+    # GDT-HA (越大越好)
+    if 'gdt_ha' in df.columns:
+        metrics_means['GDT-HA'] = df['gdt_ha'].mean()
+    
+    # MaxSub (越大越好)
+    if 'maxsub' in df.columns:
+        metrics_means['MaxSub'] = df['maxsub'].mean()
+    
+    # lDDT (越大越好)
+    if 'avg_lddt' in df.columns:
+        metrics_means['lDDT'] = df['avg_lddt'].mean()
+    
+    # Clash Score (越小越好，反向归一化)
+    if 'avg_clash_score' in df.columns and df['avg_clash_score'].max() > 0:
+        metrics_means['Clash (norm.)'] = 1 - (df['avg_clash_score'].mean() / df['avg_clash_score'].max())
     
     # 性能指标条形图
     metrics_names = list(metrics_means.keys())
     metrics_values = list(metrics_means.values())
     
-    bars = axes[1].bar(metrics_names, metrics_values, color=['#3498db', '#2ecc71', '#f39c12', '#e74c3c'])
+    # 动态生成颜色
+    bar_colors = sns.color_palette("husl", len(metrics_names))
+    
+    bars = axes[1].bar(metrics_names, metrics_values, color=bar_colors)
     axes[1].set_title('Normalized Performance Metrics', fontweight='bold')
     axes[1].set_ylabel('Normalized Score')
-    axes[1].set_ylim(0, 1)
+    axes[1].set_ylim(0, 1.05)
     axes[1].tick_params(axis='x', rotation=45)
+    # 单独设置标签对齐方式
+    for tick in axes[1].get_xticklabels():
+        tick.set_ha('right')
     
     # 在柱子上添加数值标签
     for bar, value in zip(bars, metrics_values):
@@ -396,27 +487,46 @@ def plot_performance_summary(df, figsize=(16, 6)):
                     f'{value:.3f}', ha='center', va='bottom', fontweight='bold')
     
     # 样本分布统计
-    length_stats = df['sequence_length'].describe()
+    stats_lines = [f"Sample Statistics:", f"• Total Samples: {len(df)}", ""]
     
-    stats_text = f"""
-Sample Statistics:
-• Total Samples: {len(df)}
-• Sequence Length:
-  - Min: {int(length_stats['min'])}
-  - Max: {int(length_stats['max'])}
-  - Mean: {length_stats['mean']:.1f}
-  - Median: {length_stats['50%']:.1f}
-
-• RMSD Statistics:
-  - Mean: {df['best_rmsd'].mean():.3f} A
-  - Median: {df['best_rmsd'].median():.3f} A
-  - Best: {df['best_rmsd'].min():.3f} A
-
-• TM-Score Statistics:
-  - Mean: {df['avg_tm_score'].mean():.3f}
-  - Median: {df['avg_tm_score'].median():.3f}
-  - Best: {df['avg_tm_score'].max():.3f}
-"""
+    # RMSD统计
+    if 'best_rmsd' in df.columns:
+        stats_lines.extend([
+            "• RMSD:",
+            f"  Mean: {df['best_rmsd'].mean():.3f} Å",
+            f"  Median: {df['best_rmsd'].median():.3f} Å",
+            f"  Best: {df['best_rmsd'].min():.3f} Å",
+            ""
+        ])
+    
+    # TM-Score统计
+    if 'avg_tm_score' in df.columns:
+        stats_lines.extend([
+            "• TM-Score:",
+            f"  Mean: {df['avg_tm_score'].mean():.3f}",
+            f"  Median: {df['avg_tm_score'].median():.3f}",
+            f"  Best: {df['avg_tm_score'].max():.3f}",
+            ""
+        ])
+    
+    # GDT-TS统计
+    if 'gdt_ts' in df.columns:
+        stats_lines.extend([
+            "• GDT-TS:",
+            f"  Mean: {df['gdt_ts'].mean():.3f}",
+            f"  Median: {df['gdt_ts'].median():.3f}",
+            ""
+        ])
+    
+    # lDDT统计
+    if 'avg_lddt' in df.columns:
+        stats_lines.extend([
+            "• lDDT:",
+            f"  Mean: {df['avg_lddt'].mean():.3f}",
+            f"  Median: {df['avg_lddt'].median():.3f}",
+        ])
+    
+    stats_text = "\n".join(stats_lines)
     
     axes[2].text(0.05, 0.95, stats_text, transform=axes[2].transAxes, 
                 verticalalignment='top', fontsize=10, 
@@ -433,11 +543,28 @@ Sample Statistics:
 
 def main():
     """主函数"""
+    global SAVE_PATH  # 在最前面声明全局变量
+    
+    # 解析命令行参数
+    parser = argparse.ArgumentParser(description='可视化RNA结构预测评估结果')
+    parser.add_argument('--input', type=str, default=LOAD_PATH,
+                       help='输入CSV文件路径')
+    parser.add_argument('--output-dir', type=str, default=SAVE_PATH,
+                       help='输出图片目录')
+    args = parser.parse_args()
+    
+    # 使用命令行参数或默认值
+    csv_file = args.input
+    SAVE_PATH = args.output_dir
+    
     # 确保保存目录存在
     os.makedirs(SAVE_PATH, exist_ok=True)
     
+    print(f"输入文件: {csv_file}")
+    print(f"输出目录: {SAVE_PATH}")
+    print("=" * 60)
+    
     # 加载数据
-    csv_file = LOAD_PATH
     df_all, df_success = load_and_clean_data(csv_file)
     
     print("\n开始生成可视化图表...")
@@ -446,32 +573,27 @@ def main():
     print("1. 生成指标分布图（小提琴图+箱线图）...")
     plot_metric_distributions(df_success)
     
-    print("1b. 生成单独的小提琴图...")
+    print("2. 生成单独的小提琴图...")
     plot_individual_violin_plots(df_success)
-    
-    print("2. 生成序列长度分析图...")
-    plot_sequence_length_analysis(df_success)
     
     print("3. 生成相关性热力图...")
     plot_correlation_matrix(df_success)
     
-    print("4. 生成质量评估图...")
-    plot_quality_assessment(df_success)
-    
-    print("5. 生成性能总结图...")
+    print("4. 生成性能总结图...")
     plot_performance_summary(df_success)
     
     print("\n✅ 所有可视化图表已生成完成！")
-    print("📁 生成的图片文件（位于 plots/ 文件夹）:")
-    print("   • metric_distributions.png - 指标分布图（综合）")
-    print("   • rmsd_violin_plot.png - RMSD分布（单独小提琴图）")
-    print("   • tm_score_violin_plot.png - TM-Score分布（单独小提琴图）")
-    print("   • lddt_violin_plot.png - LDDT分布（单独小提琴图）")
-    print("   • clash_score_violin_plot.png - Clash Score分布（单独小提琴图）")
-    print("   • evaluated_atoms_violin_plot.png - 评估原子数分布（单独小提琴图）")
-    print("   • sequence_length_analysis.png - 原子数量分析")
-    print("   • correlation_matrix.png - 相关性热力图")
-    print("   • quality_assessment.png - 质量评估图")
+    print("📁 生成的图片文件:")
+    print("   • metric_distributions.png - 所有指标综合分布")
+    print("   • best_rmsd_violin_plot.png - RMSD分布")
+    print("   • avg_tm_score_violin_plot.png - TM-Score分布")
+    print("   • gdt_ts_violin_plot.png - GDT-TS分布")
+    print("   • gdt_ha_violin_plot.png - GDT-HA分布")
+    print("   • maxsub_violin_plot.png - MaxSub分布")
+    print("   • avg_lddt_violin_plot.png - lDDT分布")
+    print("   • avg_clash_score_violin_plot.png - Clash Score分布")
+    print("   • seq_identity_violin_plot.png - 序列同一性分布")
+    print("   • correlation_matrix.png - 指标相关性热力图")
     print("   • performance_summary.png - 性能总结图")
 
 if __name__ == "__main__":
