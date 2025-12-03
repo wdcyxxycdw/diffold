@@ -15,7 +15,12 @@ from typing import Dict, List, Tuple, Optional
 import re
 
 
-def run_usalign(pdb1: str, pdb2: str, usalign_path: str = "USalign") -> Optional[float]:
+def run_usalign(
+    pdb1: str,
+    pdb2: str,
+    usalign_path: str = "USalign",
+    d0: Optional[float] = None,
+) -> Optional[float]:
     """
     运行USalign并返回TM-score
     
@@ -28,9 +33,15 @@ def run_usalign(pdb1: str, pdb2: str, usalign_path: str = "USalign") -> Optional
         float: TM-score（相对于第一个结构），如果失败返回None
     """
     try:
+        # 构建 USalign 命令
+        cmd = [usalign_path, pdb1, pdb2]
+        # 仅当显式指定 d0 时才传入 -d 参数；否则使用 USalign 默认 d0
+        if d0 is not None:
+            cmd.extend(["-d", str(d0)])
+
         # 运行USalign
         result = subprocess.run(
-            [usalign_path, pdb1, pdb2],
+            cmd,
             capture_output=True,
             text=True,
             timeout=30
@@ -42,9 +53,17 @@ def run_usalign(pdb1: str, pdb2: str, usalign_path: str = "USalign") -> Optional
         # 解析输出获取TM-score
         # USalign输出格式示例：
         # TM-score= 0.xxxxx (normalized by length of Structure_1: L=xxx)
+        # 或 TM-score= 0.xxxxx (scaled by user-specified d0=5.00)
         output = result.stdout
         
-        # 查找TM-score行（相对于第一个结构）
+        # 优先查找 user-specified d0 的 TM-score
+        for line in output.split('\n'):
+            if 'TM-score=' in line and 'scaled by user-specified d0' in line:
+                match = re.search(r'TM-score=\s*([\d.]+)', line)
+                if match:
+                    return float(match.group(1))
+        
+        # 如果没有找到 user-specified 的，则查找 normalized by length 的
         for line in output.split('\n'):
             if 'TM-score=' in line and 'normalized by length of Structure_1' in line:
                 match = re.search(r'TM-score=\s*([\d.]+)', line)
@@ -72,7 +91,8 @@ def compute_max_tm_scores(
     test_dir: Path,
     train_dir: Path,
     usalign_path: str = "USalign",
-    output_file: Optional[str] = None
+    output_file: Optional[str] = None,
+    d0: Optional[float] = None,
 ) -> Dict[str, Dict]:
     """
     计算测试集中每个样本与训练集的最大TM-score
@@ -106,6 +126,10 @@ def compute_max_tm_scores(
     print(f"测试集样本数: {len(test_pdbs)}")
     print(f"训练集样本数: {len(train_pdbs)}")
     print(f"USalign路径: {usalign_path}")
+    if d0 is None:
+        print("d0参数: 默认（USalign 内置默认值）")
+    else:
+        print(f"d0参数: {d0}")
     print("=" * 80)
     print()
     
@@ -130,7 +154,12 @@ def compute_max_tm_scores(
                 continue
             
             # 计算TM-score
-            tm_score = run_usalign(str(test_pdb), str(train_pdb), usalign_path)
+            tm_score = run_usalign(
+                str(test_pdb),
+                str(train_pdb),
+                usalign_path=usalign_path,
+                d0=d0,
+            )
             
             if tm_score is not None:
                 all_scores.append((train_name, tm_score))
@@ -272,7 +301,7 @@ def parse_args():
     parser.add_argument(
         '--usalign',
         type=str,
-        default='USalign',
+        default='tools/USalign',
         help='USalign可执行文件路径（默认: USalign，需在PATH中）'
     )
     
@@ -281,6 +310,13 @@ def parse_args():
         type=str,
         default=None,
         help='输出文件路径（TSV格式）'
+    )
+
+    parser.add_argument(
+        '--d0',
+        type=float,
+        default=None,
+        help='USalign 中用于 TM-score 的 d0 参数（默认: 不指定，使用 USalign 自身默认）'
     )
     
     return parser.parse_args()
@@ -316,7 +352,8 @@ def main():
         test_dir=test_dir,
         train_dir=train_dir,
         usalign_path=args.usalign,
-        output_file=args.output
+        output_file=args.output,
+        d0=args.d0,
     )
     
     if not results:

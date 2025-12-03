@@ -11,7 +11,7 @@ import logging
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 import pandas as pd
 import numpy as np
 from tqdm import tqdm
@@ -331,7 +331,7 @@ class TMscoreWrapper:
                 f"请确保工具已正确安装在 tools/ 目录"
             )
     
-    def calculate_metrics(self, pred_pdb: str, native_pdb: str, d0: float = 5.0) -> Dict:
+    def calculate_metrics(self, pred_pdb: str, native_pdb: str, d0: Optional[float] = None) -> Dict:
         """
         使用 TMscore 计算 GDT-TS, GDT-HA, MaxSub
         
@@ -353,8 +353,10 @@ class TMscoreWrapper:
                 self.tmscore_path,
                 pred_pdb,
                 native_pdb,
-                "-d", str(d0)  # 设置 d0
             ]
+            # 仅当显式指定 d0 时传入 -d 参数；否则使用 TMscore 默认 d0
+            if d0 is not None:
+                cmd.extend(["-d", str(d0)])
             
             result = subprocess.run(
                 cmd,
@@ -497,7 +499,8 @@ def evaluate_structure_pair(sample_name: str,
                            tmscore_wrapper: TMscoreWrapper,
                            lddt_calculator: LDDTCalculator,
                            clash_calculator,  # MolProbityClashCalculator or None
-                           logger: logging.Logger) -> Dict[str, Any]:
+                           logger: logging.Logger,
+                           tmscore_d0: Optional[float] = None) -> Dict[str, Any]:
     """评估单个结构对"""
     try:
         # 使用US-align计算 RMSD 和 TM-score
@@ -514,7 +517,11 @@ def evaluate_structure_pair(sample_name: str,
             }
         
         # 使用TMscore计算 GDT-TS, GDT-HA, MaxSub
-        tmscore_metrics = tmscore_wrapper.calculate_metrics(str(pred_pdb), str(native_pdb), d0=5.0)
+        tmscore_metrics = tmscore_wrapper.calculate_metrics(
+            str(pred_pdb),
+            str(native_pdb),
+            d0=tmscore_d0,
+        )
         
         # 构建结果
         result = {
@@ -750,6 +757,8 @@ python scripts/evaluate_structures.py \\
     parser.add_argument("--log_level", default="INFO",
                        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
                        help="日志级别")
+    parser.add_argument("--tmscore_d0", type=float, default=None,
+                       help="TMscore 中用于 GDT/MaxSub 计算的 d0 参数（默认: 不指定，使用 TMscore 内置默认）")
     
     args = parser.parse_args()
     
@@ -776,6 +785,10 @@ python scripts/evaluate_structures.py \\
     logger.info(f"预测目录: {pred_dir}")
     logger.info(f"真实目录: {native_dir}")
     logger.info(f"输出目录: {output_dir}")
+    if args.tmscore_d0 is None:
+        logger.info("TMscore d0: 默认（使用 TMscore 内置 d0）")
+    else:
+        logger.info(f"TMscore d0: {args.tmscore_d0}")
     logger.info("=" * 60)
     
     try:
@@ -834,7 +847,8 @@ python scripts/evaluate_structures.py \\
                 tmscore_wrapper=tmscore_wrapper,
                 lddt_calculator=lddt_calculator,
                 clash_calculator=clash_calculator,
-                logger=logger
+                logger=logger,
+                tmscore_d0=args.tmscore_d0,
             )
             results.append(result)
         
