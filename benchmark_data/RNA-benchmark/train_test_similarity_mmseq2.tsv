@@ -1,0 +1,41 @@
+test_sequence	max_identity	max_qcov	max_tcov	effective_identity	best_match	best_match_identity	best_match_qcov	best_match_tcov	best_match_evalue	best_match_bits	num_hits	query_length	best_match_qlen	best_match_tlen
+7Q48_1|Chain A|RNA (5'-R(*GP*GP*GP*CP*CP*AP*UP*UP*GP*GP*GP*UP*GP*GP*GP*AP*UP*CP*UP*GP*GP*G)-3')|Homo sapiens (9606)	0.00	0.00	0.00	0.00	N/A	0.00	0.00	0.00	1.00e+00	0.00	0	22	0	0
+7QDU_1|Chain A[auth Q]|Chains: Q|synthetic construct (32630)	0.00	0.00	0.00	0.00	N/A	0.00	0.00	0.00	1.00e+00	0.00	0	694	0	0
+7SXP_1|Chain A|NRAS mRNA|Homo sapiens (9606)	0.00	0.00	0.00	0.00	N/A	0.00	0.00	0.00	1.00e+00	0.00	0	22	0	0
+7UCR_1|Chain A|Sarcin-Ricin loop RNA|Homo sapiens (9606)	0.00	0.00	0.00	0.00	N/A	0.00	0.00	0.00	1.00e+00	0.00	0	27	0	0
+7UGA_1|Chain A|NPSL2 RNA (43-MER)|Homo sapiens (9606)	0.00	0.00	0.00	0.00	N/A	0.00	0.00	0.00	1.00e+00	0.00	0	43	0	0
+7UMC_1|Chain A|RNA (70-MER)|Dengue virus 1 (11053)	0.00	0.00	0.00	0.00	N/A	0.00	0.00	0.00	1.00e+00	0.00	0	70	0	0
+7UMD_1|Chain A|RNA (40-MER)|Dengue virus 1 (11053)	0.00	0.00	0.00	0.00	N/A	0.00	0.00	0.00	1.00e+00	0.00	0	40	0	0
+7UME_1|Chain A|RNA (28-MER)|Dengue virus 1 (11053)	0.00	0.00	0.00	0.00	N/A	0.00	0.00	0.00	1.00e+00	0.00	0	28	0	0
+7V06_1|Chain A|RNA (43-MER)|HIV whole-genome vector AA1305#18 (672471)	0.00	0.00	0.00	0.00	N/A	0.00	0.00	0.00	1.00e+00	0.00	0	43	0	0
+7WIA_1|Chain A[auth V]|RNA (50-MER)|Mesorhizobium loti (381)	0.00	0.00	0.00	0.00	N/A	0.00	0.00	0.00	1.00e+00	0.00	0	50	0	0
+7ZJ5_1|Chain A[auth E]|brocolli-pepper aptamer|synthetic construct (32630)	0.00	0.00	0.00	0.00	N/A	0.00	0.00	0.00	1.00e+00	0.00	0	1217	0	0
+8CLR_1|Chain A|RNA hairpin with CUUG tetraloop|synthetic RNA (2086595)	0.00	0.00	0.00	0.00	N/A	0.00	0.00	0.00	1.00e+00	0.00	0	14	0	0
+8CQ1_1|Chain A|5_SL4|Severe acute respiratory syndrome coronavirus 2 (2697049)	0.00	0.00	0.00	0.00	N/A	0.00	0.00	0.00	1.00e+00	0.00	0	44	0	0
+8FB3_1|Chains A, B, C|RNA (34-MER) Riboswitch|Carnobacterium antarcticum (2126436)	0.00	0.00	0.00	0.00	N/A	0.00	0.00	0.00	1.00e+00	0.00	0	34	0	0
+8FCS_1|Chain A|microRNA 31|Homo sapiens (9606)	0.00	0.00	0.00	0.00	N/A	0.00	0.00	0.00	1.00e+00	0.00	0	71	0	0
+8I44_1|Chain A|RNA-C-3AU-uucg|Mus musculus (10090)	0.00	0.00	0.00	0.00	N/A	0.00	0.00	0.00	1.00e+00	0.00	0	19	0	0
+8ITS_1|Chain A|RNA (46-MER)|bacterium (1869227)	0.00	0.00	0.00	0.00	N/A	0.00	0.00	0.00	1.00e+00	0.00	0	46	0	0
+8JHP_1|Chain A|RNA (27-MER)|Drosophila melanogaster (7227)	0.00	0.00	0.00	0.00	N/A	0.00	0.00	0.00	1.00e+00	0.00	0	27	0	0
+8K15_1|Chain A[auth C]|RNA (470-MER)|Streptococcus azizii (1579424)	0.00	0.00	0.00	0.00	N/A	0.00	0.00	0.00	1.00e+00	0.00	0	621	0	0
+8Q4O_1|Chain A|RNA (5'-R(*CP*GP*GP*UP*AP*GP*CP*GP*GP*GP*UP*AP*UP*GP*GP*GP*UP*CP*CP*GP*GP*GP*U)-3')|Homo (9605)	0.00	0.00	0.00	0.00	N/A	0.00	0.00	0.00	1.00e+00	0.00	0	23	0	0
+8QO2_1|Chain A|OC43-CoV-SL5|Human coronavirus OC43 (31631)	0.00	0.00	0.00	0.00	N/A	0.00	0.00	0.00	1.00e+00	0.00	0	222	0	0
+8QO3_1|Chain A|RoBat-CoV-SL5|Rousettus bat coronavirus GCCDC1 (2501962)	0.00	0.00	0.00	0.00	N/A	0.00	0.00	0.00	1.00e+00	0.00	0	118	0	0
+8QO4_1|Chain A|MERS-CoV-SL5|Middle East respiratory syndrome-related coronavirus (1335626)	0.00	0.00	0.00	0.00	N/A	0.00	0.00	0.00	1.00e+00	0.00	0	156	0	0
+8SCH_1|Chain A|RNA (68-MER)|Drosophila melanogaster (7227)	0.00	0.00	0.00	0.00	N/A	0.00	0.00	0.00	1.00e+00	0.00	0	68	0	0
+8SP9_1|Chain A[auth C]|tRNA scaffold,CVB3 Cloverleaf RNA|Homo sapiens (9606)	0.00	0.00	0.00	0.00	N/A	0.00	0.00	0.00	1.00e+00	0.00	0	153	0	0
+8TJU_1|Chain A|DNA/RNA (416-MER)|Tamana bat virus (161675)	0.00	0.00	0.00	0.00	N/A	0.00	0.00	0.00	1.00e+00	0.00	0	416	0	0
+8TNS_1|Chain A|RNA (5'-R(*GP*UP*GP*UP*GP*UP*GP*UP*GP*UP*GP*UP*GP*UP*GP*UP*GP*UP*GP*UP*GP*UP*GP*U)-3')|Caenorhabditis elegans (6239)	0.00	0.00	0.00	0.00	N/A	0.00	0.00	0.00	1.00e+00	0.00	0	24	0	0
+8TVZ_1|Chain A[auth C]|RNA (363-MER)|synthetic construct (32630)	0.00	0.00	0.00	0.00	N/A	0.00	0.00	0.00	1.00e+00	0.00	0	517	0	0
+8UPT_1|Chain A|RNA (71-MER)|Candidatus Methanomethylophilus alvus (1291540)	0.00	0.00	0.00	0.00	N/A	0.00	0.00	0.00	1.00e+00	0.00	0	71	0	0
+8UTG_1|Chains A, B|RNA (5'-R(*UP*AP*UP*GP*GP*AP*AP*GP*AP*GP*GP*CP*GP*GP*UP*UP*GP*GP*UP*AP*U)-3')|West Nile virus strain NY-99 (1968826)	0.00	0.00	0.00	0.00	N/A	0.00	0.00	0.00	1.00e+00	0.00	0	21	0	0
+8UYE_1|Chain A|BtCoV-HKU5 5' proximal stem-loop 5|Pipistrellus bat coronavirus HKU5 (694008)	0.00	0.00	0.00	0.00	N/A	0.00	0.00	0.00	1.00e+00	0.00	0	135	0	0
+8UYS_1|Chain A|SARS-CoV-2 RNA SL5 domain.|Severe acute respiratory syndrome coronavirus 2 (2697049)	0.00	0.00	0.00	0.00	N/A	0.00	0.00	0.00	1.00e+00	0.00	0	124	0	0
+8V1H_1|Chain A|pre-mascRNA|Homo sapiens (9606)	0.00	0.00	0.00	0.00	N/A	0.00	0.00	0.00	1.00e+00	0.00	0	75	0	0
+8V1I_1|Chains A, B|mascRNA|Homo sapiens (9606)	0.00	0.00	0.00	0.00	N/A	0.00	0.00	0.00	1.00e+00	0.00	0	57	0	0
+8VCI_1|Chain A|Frameshift Stimulatory Element with Upstream Multi-branch Loop|Severe acute respiratory syndrome coronavirus 2 (2697049)	0.00	0.00	0.00	0.00	N/A	0.00	0.00	0.00	1.00e+00	0.00	0	118	0	0
+8VPV_1|Chain A|RNA (101-MER)|Faecalibacterium prausnitzii (853)	0.00	0.00	0.00	0.00	N/A	0.00	0.00	0.00	1.00e+00	0.00	0	100	0	0
+8VT5_1|Chain A|menRNA|Homo sapiens (9606)	0.00	0.00	0.00	0.00	N/A	0.00	0.00	0.00	1.00e+00	0.00	0	60	0	0
+8XZL_1|Chain A|RNA (53-MER)|unidentified eubacterium clone A70 (41312)	0.00	0.00	0.00	0.00	N/A	0.00	0.00	0.00	1.00e+00	0.00	0	53	0	0
+8YAN_1|Chain A|RNA (33-MER)|Caldanaerobacter subterraneus subsp. tengcongensis (119072)	0.00	0.00	0.00	0.00	N/A	0.00	0.00	0.00	1.00e+00	0.00	0	33	0	0
+9BUN_1|Chains A, B, C, D|RNA (48-MER)|synthetic construct (32630)	0.00	0.00	0.00	0.00	N/A	0.00	0.00	0.00	1.00e+00	0.00	0	163	0	0
