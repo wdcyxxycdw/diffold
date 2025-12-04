@@ -11,7 +11,7 @@ import subprocess
 import os
 import sys
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Set
 import re
 
 
@@ -34,10 +34,16 @@ def run_usalign(
     """
     try:
         # 构建 USalign 命令
-        cmd = [usalign_path, pdb1, pdb2]
-        # 仅当显式指定 d0 时才传入 -d 参数；否则使用 USalign 默认 d0
+        # 默认顺序：pdb1 为测试集，pdb2 为训练集
+        # 当显式指定 d0 时，为了让 user-specified d0 的 TM-score
+        # 使用训练集长度 L 归一化，则交换输入顺序：
+        #   Structure_1 = 测试集，Structure_2 = 训练集（用于 user-specified d0 的 L）
         if d0 is not None:
-            cmd.extend(["-d", str(d0)])
+            # 交换顺序，让训练集作为第二个结构，从而 user-specified d0 的 TM-score
+            # 使用训练集长度 L（USalign 对 user-specified d0 的 TM-score 使用 Structure_2 的 L）
+            cmd = [usalign_path, pdb2, pdb1, "-d", str(d0)]
+        else:
+            cmd = [usalign_path, pdb1, pdb2]
 
         # 运行USalign
         result = subprocess.run(
@@ -87,11 +93,30 @@ def get_pdb_files(directory: Path) -> List[Path]:
     return sorted(pdb_files)
 
 
+def load_id_list(id_list_path: Path) -> List[str]:
+    """
+    读取训练集实际使用的样本 ID 列表文件
+    
+    文件格式:
+        - 每行一个样本 ID（通常与 PDB 文件名的 stem 对应，例如: 1jgq_1）
+        - 忽略空行和以 # 开头的注释行
+    """
+    ids: List[str] = []
+    with open(id_list_path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            ids.append(line)
+    return ids
+
+
 def compute_max_tm_scores(
     test_dir: Path,
     train_dir: Path,
     usalign_path: str = "USalign",
     output_file: Optional[str] = None,
+    train_id_list: Optional[List[str]] = None,
     d0: Optional[float] = None,
 ) -> Dict[str, Dict]:
     """
@@ -117,6 +142,33 @@ def compute_max_tm_scores(
     if not train_pdbs:
         print(f"错误: 在 {train_dir} 中未找到PDB文件", file=sys.stderr)
         return {}
+
+    # 如果提供了训练集 ID 列表，则只保留这些 ID 对应的 PDB
+    if train_id_list is not None:
+        train_id_set: Set[str] = set(train_id_list)
+        original_train_count = len(train_pdbs)
+        filtered_train_pdbs = [p for p in train_pdbs if p.stem in train_id_set]
+
+        if not filtered_train_pdbs:
+            print(
+                f"错误: 根据提供的训练集 ID 列表，在 {train_dir} 中未找到任何匹配的 PDB 文件",
+                file=sys.stderr,
+            )
+            return {}
+
+        # 记录哪些 ID 在目录中缺失，便于用户检查
+        missing_ids = sorted(train_id_set - {p.stem for p in filtered_train_pdbs})
+        if missing_ids:
+            print(
+                f"警告: 训练集 ID 列表中有 {len(missing_ids)} 个 ID 在目录中未找到对应的 PDB 文件",
+                file=sys.stderr,
+            )
+            # 只打印前若干个，避免输出过长
+            preview = ", ".join(missing_ids[:20])
+            print(f"  缺失示例: {preview}{' ...' if len(missing_ids) > 20 else ''}",
+                  file=sys.stderr)
+
+        train_pdbs = filtered_train_pdbs
     
     print("=" * 80)
     print("TM-score 相似度分析")
@@ -276,6 +328,10 @@ def parse_args():
   # 保存结果到文件
   python compute_tm_scores.py --test_dir test/ --train_dir train/ --output results.tsv
 
+  # 只使用训练集 ID 列表中指定的样本
+  python compute_tm_scores.py --test_dir test/ --train_dir train/ \\
+      --train_id_list processed_data/list/fold-3_train_ids
+
 说明:
   - TM-score范围: 0-1，越高表示结构越相似
   - TM-score >= 0.5: 通常认为是相同的折叠类型
@@ -291,11 +347,18 @@ def parse_args():
         help='测试集目录（包含PDB文件）'
     )
     
-    parser.add_argument(
+    parser.add_argument( 
         '--train_dir',
         type=str,
-        required=True,
+        default='processed_data/pdb',
         help='训练集目录（包含PDB文件）'
+    )
+    
+    parser.add_argument(
+        '--train_id_list',
+        type=str,
+        default=None,
+        help='训练集实际使用的样本 ID 列表文件（每行一个 ID，例如 processed_data/list/fold-3_train_ids）'
     )
     
     parser.add_argument(
@@ -346,6 +409,18 @@ def main():
     if not train_dir.exists():
         print(f"错误: 训练集目录不存在: {train_dir}", file=sys.stderr)
         return 1
+
+    # 可选的训练集 ID 列表
+    train_ids: Optional[List[str]] = None
+    if args.train_id_list is not None:
+        id_list_path = Path(args.train_id_list)
+        if not id_list_path.exists():
+            print(f"错误: 训练集 ID 列表文件不存在: {id_list_path}", file=sys.stderr)
+            return 1
+        train_ids = load_id_list(id_list_path)
+        if not train_ids:
+            print(f"错误: 从训练集 ID 列表文件中未读取到任何 ID: {id_list_path}", file=sys.stderr)
+            return 1
     
     # 计算TM-scores
     results = compute_max_tm_scores(
@@ -353,6 +428,7 @@ def main():
         train_dir=train_dir,
         usalign_path=args.usalign,
         output_file=args.output,
+        train_id_list=train_ids,
         d0=args.d0,
     )
     

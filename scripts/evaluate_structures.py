@@ -234,9 +234,14 @@ class USalignWrapper:
                 f"请确保工具已正确安装在 tools/ 目录"
             )
     
-    def calculate_metrics(self, pred_pdb: str, native_pdb: str) -> Dict:
+    def calculate_metrics(self, pred_pdb: str, native_pdb: str, d0: Optional[float] = None) -> Dict:
         """
         使用 US-align 计算 RMSD, TM-score, GDT-TS
+        
+        Args:
+            pred_pdb: 预测PDB文件路径
+            native_pdb: 真实PDB文件路径
+            d0: TM-score归一化参数，如果为None则不指定（使用US-align默认值）
         
         返回格式：
         {
@@ -250,14 +255,26 @@ class USalignWrapper:
         """
         try:
             # 运行 US-align
-            cmd = [
-                self.usalign_path,
-                pred_pdb,
-                native_pdb,
-                "-mol", "RNA",  # RNA 模式
-                "-ter", "0",    # 不按 TER 记录分割链
-                "-d", "5.0"     # 设置 d0=5.0 用于 TM-score 归一化
-            ]
+            # 默认顺序：pred_pdb 在前，native_pdb 在后
+            # 当显式指定 d0 时，按你的约定「交换两个结构输入顺序」
+            # 以便 user-specified d0 的 TM-score 使用另一条链的长度 L
+            if d0 is not None:
+                cmd = [
+                    self.usalign_path,
+                    native_pdb,
+                    pred_pdb,
+                    "-mol", "RNA",  # RNA 模式
+                    "-ter", "0",    # 不按 TER 记录分割链
+                    "-d", str(d0),
+                ]
+            else:
+                cmd = [
+                    self.usalign_path,
+                    pred_pdb,
+                    native_pdb,
+                    "-mol", "RNA",  # RNA 模式
+                    "-ter", "0",    # 不按 TER 记录分割链
+                ]
             
             result = subprocess.run(
                 cmd,
@@ -500,11 +517,12 @@ def evaluate_structure_pair(sample_name: str,
                            lddt_calculator: LDDTCalculator,
                            clash_calculator,  # MolProbityClashCalculator or None
                            logger: logging.Logger,
+                           usalign_d0: Optional[float] = None,
                            tmscore_d0: Optional[float] = None) -> Dict[str, Any]:
     """评估单个结构对"""
     try:
         # 使用US-align计算 RMSD 和 TM-score
-        metrics = usalign_wrapper.calculate_metrics(str(pred_pdb), str(native_pdb))
+        metrics = usalign_wrapper.calculate_metrics(str(pred_pdb), str(native_pdb), d0=usalign_d0)
         
         if 'error' in metrics:
             logger.warning(f"样本 {sample_name}: US-align失败: {metrics['error']}")
@@ -532,7 +550,10 @@ def evaluate_structure_pair(sample_name: str,
             'rmsd': metrics.get('rmsd'),
             'tm_score': metrics.get('tm_score'),
             'aligned_length': metrics.get('aligned_length'),
-            'seq_identity': metrics.get('seq_identity')
+            'seq_identity': metrics.get('seq_identity'),
+            # 统一的序列长度（残基数），优先使用 lDDT 统计到的 num_residues
+            # 不依赖 US-align 的 Structure_1 / Structure_2 顺序
+            'seq_len': None,
         }
         
         # 添加TMscore的指标
@@ -552,7 +573,14 @@ def evaluate_structure_pair(sample_name: str,
         if 'error' not in lddt_metrics:
             result['lddt'] = lddt_metrics.get('lddt')
             result['lddt_std'] = lddt_metrics.get('lddt_std')
-            result['lddt_num_residues'] = lddt_metrics.get('num_residues')
+            num_residues = lddt_metrics.get('num_residues')
+            result['lddt_num_residues'] = num_residues
+            # 使用 lDDT 的 num_residues 作为统一的序列长度
+            if num_residues is not None:
+                try:
+                    result['seq_len'] = int(num_residues)
+                except (TypeError, ValueError):
+                    pass
         else:
             logger.debug(f"样本 {sample_name}: lDDT计算失败: {lddt_metrics['error']}")
         
@@ -757,6 +785,8 @@ python scripts/evaluate_structures.py \\
     parser.add_argument("--log_level", default="INFO",
                        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
                        help="日志级别")
+    parser.add_argument("--usalign_d0", type=float, default=None,
+                       help="US-align 中用于 TM-score 归一化的 d0 参数（默认: 不指定，使用 US-align 内置默认）")
     parser.add_argument("--tmscore_d0", type=float, default=None,
                        help="TMscore 中用于 GDT/MaxSub 计算的 d0 参数（默认: 不指定，使用 TMscore 内置默认）")
     
@@ -785,6 +815,10 @@ python scripts/evaluate_structures.py \\
     logger.info(f"预测目录: {pred_dir}")
     logger.info(f"真实目录: {native_dir}")
     logger.info(f"输出目录: {output_dir}")
+    if args.usalign_d0 is None:
+        logger.info("US-align d0: 默认（使用 US-align 内置 d0）")
+    else:
+        logger.info(f"US-align d0: {args.usalign_d0}")
     if args.tmscore_d0 is None:
         logger.info("TMscore d0: 默认（使用 TMscore 内置 d0）")
     else:
@@ -848,6 +882,7 @@ python scripts/evaluate_structures.py \\
                 lddt_calculator=lddt_calculator,
                 clash_calculator=clash_calculator,
                 logger=logger,
+                usalign_d0=args.usalign_d0,
                 tmscore_d0=args.tmscore_d0,
             )
             results.append(result)
