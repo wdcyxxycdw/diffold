@@ -41,8 +41,11 @@ def extract_tm_scores(csv_path):
         else:
             raise ValueError(f"无法在文件 {csv_path} 中找到tm_score或TM_Score列")
         
-        # 从文件名提取模型名称（去掉路径和扩展名）
-        model_name = Path(csv_path).stem
+        # 从路径提取模型名称：
+        #  - 对单模型评估: results/single_performance/af3/evaluation_results.csv -> af3
+        #  - 对DiffFold:   results/single_diffold_output/evaluation_results_d0=5/evaluation_results.csv -> evaluation_results_d0=5
+        path = Path(csv_path)
+        model_name = path.parent.name or path.stem
         
         return model_name, tm_scores
     
@@ -56,7 +59,18 @@ def beautify_model_name(model_name):
     美化模型名称显示
     """
     name_mapping = {
-        'evaluation_results': 'DiffFold',
+        # 单模型评估目录名
+        'af3': 'AF3',
+        'boltz': 'Boltz-1',
+        'chai': 'Chai',
+        'hf3': 'HF3',
+        'nufold': 'NuFold',
+        'rf2na': 'RF2NA',
+        'rhofold': 'RhoFold+',
+        'trrosetta': 'trRosettaRNA',
+        # DiffFold 单模型评估目录
+        'evaluation_results_d0=5': 'DiffFold',
+        # 兼容旧的 tm_* 命名
         'tm_af3': 'AF3',
         'tm_boltz': 'Boltz-1',
         'tm_chai': 'Chai',
