@@ -14,23 +14,28 @@ import warnings
 import argparse
 warnings.filterwarnings('ignore')
 
-# 设置字体和样式
-plt.rcParams['font.family'] = 'DejaVu Sans'
+# 设置字体和样式 - 学术论文标准
+plt.rcParams['font.family'] = 'Arial'
+plt.rcParams['font.size'] = 11
 plt.rcParams['axes.unicode_minus'] = False
-plt.style.use('seaborn-v0_8')
-sns.set_palette("husl")
+plt.rcParams['axes.linewidth'] = 1.2
+plt.rcParams['xtick.major.width'] = 1.2
+plt.rcParams['ytick.major.width'] = 1.2
+plt.rcParams['xtick.major.size'] = 5
+plt.rcParams['ytick.major.size'] = 5
+plt.style.use('seaborn-v0_8-white')
 
-# 统一的颜色配置
+# 统一的颜色配置 - 专业学术配色
 MODEL_COLORS = {
     'Diffold': {
-        'violin': '#6baed6',      # 浅蓝色 (violin plot)
-        'points': '#08519c',       # 深蓝色 (数据点)
-        'edge': '#08306b'          # 更深蓝色 (边框)
+        'violin': '#4472C4',      # 专业蓝色
+        'points': '#2E5090',       # 深蓝色
+        'edge': '#1F3864'          # 深边框
     },
     'Rhofold+(unrelaxed)': {
-        'violin': '#fd8d3c',       # 浅橙色 (violin plot)
-        'points': '#d94801',       # 深橙色 (数据点)
-        'edge': '#7f2704'          # 更深橙色 (边框)
+        'violin': '#ED7D31',       # 专业橙色
+        'points': '#C65911',       # 深橙色
+        'edge': '#833C0B'          # 深边框
     }
 }
 
@@ -121,60 +126,51 @@ def load_and_prepare_data(diffold_path, rhofold_path):
 def create_comparison_violin_plots(df, save_path="plots"):
     """Create comparison violin plots"""
     
-    # Metrics information (all possible metrics)
+    # Metrics information - 只选择关键指标用于综合图
+    selected_metrics = ['rmsd', 'tm_score', 'lddt', 'clash_score', 'gdt_ts']
+    
     all_metrics_info = {
         'rmsd': {
-            'label': 'RMSD (Angstrom)',
+            'label': 'RMSD (Å)',
             'better': 'lower'
         },
         'tm_score': {
-            'label': 'TM-Score (d0=5.0)',
+            'label': 'TM-score',
             'better': 'higher'
+        },
+        'lddt': {
+            'label': 'lDDT',
+            'better': 'higher'
+        },
+        'clash_score': {
+            'label': 'Clash score',
+            'better': 'lower'
         },
         'gdt_ts': {
             'label': 'GDT-TS',
             'better': 'higher'
-        },
-        'gdt_ha': {
-            'label': 'GDT-HA',
-            'better': 'higher'
-        },
-        'maxsub': {
-            'label': 'MaxSub Score',
-            'better': 'higher'
-        },
-        'lddt': {
-            'label': 'lDDT Score',
-            'better': 'higher'
-        },
-        'clash_score': {
-            'label': 'Clash Score',
-            'better': 'lower'
         }
     }
     
-    # Filter to only available metrics
-    metrics_info = {k: v for k, v in all_metrics_info.items() if k in df.columns}
+    # Filter to only available and selected metrics
+    metrics_info = {k: v for k in selected_metrics for k, v in all_metrics_info.items() 
+                   if k == k and k in df.columns}
     
     num_metrics = len(metrics_info)
-    print(f"Creating comparison plots for {num_metrics} metrics")
+    print(f"Creating comparison plots for {num_metrics} key metrics")
     
     # Create save directory
     Path(save_path).mkdir(parents=True, exist_ok=True)
     
-    # Determine subplot layout
-    if num_metrics <= 4:
-        nrows, ncols = 2, 2
-        figsize = (16, 12)
-    elif num_metrics <= 6:
-        nrows, ncols = 2, 3
-        figsize = (20, 12)
-    else:
-        nrows, ncols = 3, 3
-        figsize = (24, 16)
+    # Fixed layout for 5 metrics: 2 rows x 3 columns
+    nrows, ncols = 2, 3
+    figsize = (18, 10)
     
     fig, axes = plt.subplots(nrows, ncols, figsize=figsize)
     axes = axes.flatten()
+    
+    # Panel labels
+    panel_labels = ['(a)', '(b)', '(c)', '(d)', '(e)']
     
     for i, (metric, info) in enumerate(metrics_info.items()):
         ax = axes[i]
@@ -187,7 +183,7 @@ def create_comparison_violin_plots(df, save_path="plots"):
         violin_parts = ax.violinplot(
             [diffold_data, rhofold_data],
             positions=[0, 1],
-            widths=0.6,
+            widths=0.65,
             showmeans=False,
             showmedians=False,
             showextrema=False
@@ -197,45 +193,47 @@ def create_comparison_violin_plots(df, save_path="plots"):
         colors = [MODEL_COLORS['Diffold']['violin'], MODEL_COLORS['Rhofold+(unrelaxed)']['violin']]
         for pc, color in zip(violin_parts['bodies'], colors):
             pc.set_facecolor(color)
-            pc.set_alpha(0.7)
+            pc.set_alpha(0.6)
             pc.set_edgecolor('black')
-            pc.set_linewidth(1.5)
+            pc.set_linewidth(1.0)
         
-        # Add data points with jitter (more concentrated around center)
-        np.random.seed(42)  # For reproducible jitter
-        jitter_width = 0.08  # Reduced jitter width for better centering
+        # Add box plot overlay for better statistics visualization
+        bp = ax.boxplot(
+            [diffold_data, rhofold_data],
+            positions=[0, 1],
+            widths=0.15,
+            patch_artist=False,
+            showfliers=False,
+            showcaps=False,
+            whiskerprops=dict(linewidth=1.5, color='black'),
+            boxprops=dict(linewidth=1.5, color='black'),
+            medianprops=dict(linewidth=2.5, color='darkred')
+        )
         
-        # Add Diffold data points with unified colors
-        diffold_jitter = np.random.normal(0, jitter_width, size=len(diffold_data))
-        ax.scatter(diffold_jitter, diffold_data, 
-                  color=MODEL_COLORS['Diffold']['points'], 
-                  s=60, alpha=0.8, 
-                  edgecolors=MODEL_COLORS['Diffold']['edge'], 
-                  linewidths=1.8, zorder=3)
-        
-        # Add RhoFold+ data points with unified colors
-        rhofold_jitter = np.random.normal(1, jitter_width, size=len(rhofold_data))
-        ax.scatter(rhofold_jitter, rhofold_data, 
-                  color=MODEL_COLORS['Rhofold+(unrelaxed)']['points'], 
-                  s=60, alpha=0.8, 
-                  edgecolors=MODEL_COLORS['Rhofold+(unrelaxed)']['edge'], 
-                  linewidths=1.8, zorder=3)
-        
-        # Set labels and title
+        # Set labels and title (更简洁)
         ax.set_xticks([0, 1])
-        ax.set_xticklabels(['Diffold', 'RhoFold+'], fontsize=14, fontweight='bold')
-        ax.set_ylabel(info['label'], fontsize=14, fontweight='bold')
-        ax.set_title(f'{info["label"]} Comparison', fontsize=16, fontweight='bold', pad=20)
+        ax.set_xticklabels(['Diffold', 'RhoFold+'], fontsize=12)
+        ax.set_ylabel(info['label'], fontsize=13)
+        ax.set_title(info["label"], fontsize=14, pad=15)
+        
+        # Add panel label
+        if i < len(panel_labels):
+            ax.text(-0.15, 1.05, panel_labels[i], transform=ax.transAxes,
+                   fontsize=16, fontweight='bold', va='top', ha='right')
         
         # Keep y-axis ticks and values
-        ax.tick_params(axis='y', labelsize=10)
+        ax.tick_params(axis='y', labelsize=11)
+        ax.tick_params(axis='x', labelsize=12)
         
-        ax.grid(True, alpha=0.3)
+        ax.grid(True, alpha=0.25, axis='y', linestyle='--')
+        ax.set_axisbelow(True)
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
+        ax.spines['left'].set_linewidth(1.2)
+        ax.spines['bottom'].set_linewidth(1.2)
     
     # Hide unused subplots
-    for idx in range(len(metrics_info), len(axes)):
+    for idx in range(num_metrics, len(axes)):
         axes[idx].set_visible(False)
     
     plt.tight_layout()
@@ -249,11 +247,11 @@ def create_individual_comparison_plots(df, save_path="plots"):
     # All possible metrics
     all_metrics_info = {
         'rmsd': {
-            'label': 'RMSD (Angstrom)', 
+            'label': 'RMSD (Å)', 
             'better': 'lower'
         },
         'tm_score': {
-            'label': 'TM-Score (d0=5.0)', 
+            'label': 'TM-score', 
             'better': 'higher'
         },
         'gdt_ts': {
@@ -265,15 +263,15 @@ def create_individual_comparison_plots(df, save_path="plots"):
             'better': 'higher'
         },
         'maxsub': {
-            'label': 'MaxSub Score',
+            'label': 'MaxSub',
             'better': 'higher'
         },
         'lddt': {
-            'label': 'lDDT Score', 
+            'label': 'lDDT', 
             'better': 'higher'
         },
         'clash_score': {
-            'label': 'Clash Score', 
+            'label': 'Clash score', 
             'better': 'lower'
         }
     }
@@ -304,42 +302,39 @@ def create_individual_comparison_plots(df, save_path="plots"):
         colors = [MODEL_COLORS['Diffold']['violin'], MODEL_COLORS['Rhofold+(unrelaxed)']['violin']]
         for pc, color in zip(violin_parts['bodies'], colors):
             pc.set_facecolor(color)
-            pc.set_alpha(0.7)
+            pc.set_alpha(0.6)
             pc.set_edgecolor('black')
-            pc.set_linewidth(2)
+            pc.set_linewidth(1.2)
         
-        # Add data points with jitter (more concentrated around center)
-        np.random.seed(42)  # For reproducible jitter
-        jitter_width = 0.08  # Reduced jitter width for better centering
+        # Add box plot overlay for better statistics visualization
+        bp = ax.boxplot(
+            [diffold_data, rhofold_data],
+            positions=[0, 1],
+            widths=0.2,
+            patch_artist=False,
+            showfliers=False,
+            showcaps=False,
+            whiskerprops=dict(linewidth=2.0, color='black'),
+            boxprops=dict(linewidth=2.0, color='black'),
+            medianprops=dict(linewidth=3.0, color='darkred')
+        )
         
-        # Add Diffold data points with unified colors
-        diffold_jitter = np.random.normal(0, jitter_width, size=len(diffold_data))
-        ax.scatter(diffold_jitter, diffold_data, 
-                  color=MODEL_COLORS['Diffold']['points'], 
-                  s=80, alpha=0.8, 
-                  edgecolors=MODEL_COLORS['Diffold']['edge'], 
-                  linewidths=2, zorder=3)
-        
-        # Add RhoFold+ data points with unified colors
-        rhofold_jitter = np.random.normal(1, jitter_width, size=len(rhofold_data))
-        ax.scatter(rhofold_jitter, rhofold_data, 
-                  color=MODEL_COLORS['Rhofold+(unrelaxed)']['points'], 
-                  s=80, alpha=0.8, 
-                  edgecolors=MODEL_COLORS['Rhofold+(unrelaxed)']['edge'], 
-                  linewidths=2, zorder=3)
-        
-        # Set labels
+        # Set labels (更学术化)
         ax.set_xticks([0, 1])
-        ax.set_xticklabels(['Diffold', 'RhoFold+'], fontsize=16, fontweight='bold')
-        ax.set_ylabel(f'{info["label"]}', fontsize=16, fontweight='bold')
-        ax.set_title(f'{info["label"]} Comparison', fontsize=18, fontweight='bold', pad=25)
+        ax.set_xticklabels(['Diffold', 'RhoFold+'], fontsize=16)
+        ax.set_ylabel(info["label"], fontsize=17)
+        ax.set_title(info["label"], fontsize=19, pad=20)
         
         # Keep y-axis ticks and values
-        ax.tick_params(axis='y', labelsize=12)
+        ax.tick_params(axis='y', labelsize=14)
+        ax.tick_params(axis='x', labelsize=16)
         
-        ax.grid(True, alpha=0.3)
+        ax.grid(True, alpha=0.25, axis='y', linestyle='--')
+        ax.set_axisbelow(True)
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
+        ax.spines['left'].set_linewidth(1.5)
+        ax.spines['bottom'].set_linewidth(1.5)
         
         # Save figure
         filename = f'{save_path}/{metric}_comparison.png'
@@ -351,7 +346,9 @@ def create_individual_comparison_plots(df, save_path="plots"):
 def create_box_plot_comparison(df, save_path="plots"):
     """Create box plot comparison (论文标准格式)"""
     
-    # All possible metrics
+    # 只选择关键指标用于综合图
+    selected_metrics = ['rmsd', 'tm_score', 'lddt', 'clash_score', 'gdt_ts']
+    
     all_metrics_info = {
         'rmsd': {
             'label': 'RMSD',
@@ -359,22 +356,7 @@ def create_box_plot_comparison(df, save_path="plots"):
             'better': 'lower'
         },
         'tm_score': {
-            'label': 'TM-Score',
-            'unit': '',
-            'better': 'higher'
-        },
-        'gdt_ts': {
-            'label': 'GDT-TS',
-            'unit': '',
-            'better': 'higher'
-        },
-        'gdt_ha': {
-            'label': 'GDT-HA',
-            'unit': '',
-            'better': 'higher'
-        },
-        'maxsub': {
-            'label': 'MaxSub',
+            'label': 'TM-score',
             'unit': '',
             'better': 'higher'
         },
@@ -384,33 +366,35 @@ def create_box_plot_comparison(df, save_path="plots"):
             'better': 'higher'
         },
         'clash_score': {
-            'label': 'Clash Score',
+            'label': 'Clash score',
             'unit': '',
             'better': 'lower'
+        },
+        'gdt_ts': {
+            'label': 'GDT-TS',
+            'unit': '',
+            'better': 'higher'
         }
     }
     
-    # Filter to only available metrics
-    metrics_info = {k: v for k, v in all_metrics_info.items() if k in df.columns}
+    # Filter to only available and selected metrics
+    metrics_info = {k: v for k in selected_metrics for k, v in all_metrics_info.items() 
+                   if k == k and k in df.columns}
     
     num_metrics = len(metrics_info)
-    print(f"Creating box plot for {num_metrics} metrics")
+    print(f"Creating box plot for {num_metrics} key metrics")
     
     Path(save_path).mkdir(parents=True, exist_ok=True)
     
-    # Determine subplot layout
-    if num_metrics <= 4:
-        nrows, ncols = 2, 2
-        figsize = (16, 12)
-    elif num_metrics <= 6:
-        nrows, ncols = 2, 3
-        figsize = (20, 12)
-    else:
-        nrows, ncols = 3, 3
-        figsize = (24, 16)
+    # Fixed layout for 5 metrics: 2 rows x 3 columns
+    nrows, ncols = 2, 3
+    figsize = (18, 10)
     
     fig, axes = plt.subplots(nrows, ncols, figsize=figsize)
     axes = axes.flatten()
+    
+    # Panel labels
+    panel_labels = ['(a)', '(b)', '(c)', '(d)', '(e)']
     
     for i, (metric, info) in enumerate(metrics_info.items()):
         ax = axes[i]
@@ -427,38 +411,47 @@ def create_box_plot_comparison(df, save_path="plots"):
                        patch_artist=True,
                        widths=0.6,
                        showfliers=True,
-                       flierprops=dict(marker='o', markerfacecolor='red', markersize=6, 
-                                      linestyle='none', markeredgecolor='darkred', alpha=0.6))
+                       flierprops=dict(marker='o', markerfacecolor='gray', markersize=4, 
+                                      linestyle='none', markeredgecolor='black', alpha=0.5, linewidth=0.5))
         
         # Set colors using unified color scheme
         colors = [MODEL_COLORS['Diffold']['violin'], MODEL_COLORS['Rhofold+(unrelaxed)']['violin']]
         for patch, color in zip(bp['boxes'], colors):
             patch.set_facecolor(color)
-            patch.set_alpha(0.7)
+            patch.set_alpha(0.65)
             patch.set_edgecolor('black')
-            patch.set_linewidth(1.5)
+            patch.set_linewidth(1.2)
         
         # Style median lines
         for median in bp['medians']:
-            median.set(color='darkred', linewidth=2.5)
+            median.set(color='black', linewidth=2.0)
         
         # Style whiskers and caps
         for whisker in bp['whiskers']:
-            whisker.set(color='black', linewidth=1.5, linestyle='-')
+            whisker.set(color='black', linewidth=1.2, linestyle='-')
         for cap in bp['caps']:
-            cap.set(color='black', linewidth=1.5)
+            cap.set(color='black', linewidth=1.2)
         
-        # Set labels and title
+        # Set labels and title (更简洁)
         unit_str = f" ({info['unit']})" if info['unit'] else ""
-        ax.set_ylabel(f'{info["label"]}{unit_str}', fontsize=13, fontweight='bold')
-        ax.set_title(f'{info["label"]}', fontsize=15, fontweight='bold', pad=15)
+        ax.set_ylabel(f'{info["label"]}{unit_str}', fontsize=13)
+        ax.set_title(info["label"], fontsize=14, pad=15)
+        
+        # Add panel label
+        if i < len(panel_labels):
+            ax.text(-0.15, 1.05, panel_labels[i], transform=ax.transAxes,
+                   fontsize=16, fontweight='bold', va='top', ha='right')
+        
         ax.tick_params(axis='both', labelsize=11)
-        ax.grid(True, alpha=0.3, axis='y')
+        ax.grid(True, alpha=0.25, axis='y', linestyle='--')
+        ax.set_axisbelow(True)
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
+        ax.spines['left'].set_linewidth(1.2)
+        ax.spines['bottom'].set_linewidth(1.2)
     
     # Hide unused subplots
-    for idx in range(len(metrics_info), len(axes)):
+    for idx in range(num_metrics, len(axes)):
         axes[idx].set_visible(False)
     
     plt.tight_layout()
@@ -471,12 +464,12 @@ def create_individual_box_plots(df, save_path="plots"):
     
     all_metrics_info = {
         'rmsd': {'label': 'RMSD', 'unit': 'Å', 'better': 'lower'},
-        'tm_score': {'label': 'TM-Score', 'unit': '', 'better': 'higher'},
+        'tm_score': {'label': 'TM-score', 'unit': '', 'better': 'higher'},
         'gdt_ts': {'label': 'GDT-TS', 'unit': '', 'better': 'higher'},
         'gdt_ha': {'label': 'GDT-HA', 'unit': '', 'better': 'higher'},
         'maxsub': {'label': 'MaxSub', 'unit': '', 'better': 'higher'},
-        'lddt': {'label': 'lDDT Score', 'unit': '', 'better': 'higher'},
-        'clash_score': {'label': 'Clash Score', 'unit': '', 'better': 'lower'}
+        'lddt': {'label': 'lDDT', 'unit': '', 'better': 'higher'},
+        'clash_score': {'label': 'Clash score', 'unit': '', 'better': 'lower'}
     }
     
     metrics_info = {k: v for k, v in all_metrics_info.items() if k in df.columns}
@@ -495,44 +488,45 @@ def create_individual_box_plots(df, save_path="plots"):
         bp = ax.boxplot(data_to_plot,
                        labels=['Diffold', 'RhoFold+'],
                        patch_artist=True,
-                       widths=0.5,
+                       widths=0.55,
                        showfliers=True,
-                       flierprops=dict(marker='o', markerfacecolor='red', markersize=8,
-                                      linestyle='none', markeredgecolor='darkred', alpha=0.7))
+                       flierprops=dict(marker='o', markerfacecolor='gray', markersize=5,
+                                      linestyle='none', markeredgecolor='black', alpha=0.5, linewidth=0.8))
         
         # Set colors
         colors = [MODEL_COLORS['Diffold']['violin'], MODEL_COLORS['Rhofold+(unrelaxed)']['violin']]
-        edge_colors = [MODEL_COLORS['Diffold']['edge'], MODEL_COLORS['Rhofold+(unrelaxed)']['edge']]
         
-        for patch, color, edge_color in zip(bp['boxes'], colors, edge_colors):
+        for patch, color in zip(bp['boxes'], colors):
             patch.set_facecolor(color)
-            patch.set_alpha(0.75)
-            patch.set_edgecolor(edge_color)
-            patch.set_linewidth(2)
+            patch.set_alpha(0.7)
+            patch.set_edgecolor('black')
+            patch.set_linewidth(1.5)
         
-        # Style median lines (make them stand out)
+        # Style median lines (黑色更专业)
         for median in bp['medians']:
-            median.set(color='darkred', linewidth=3)
+            median.set(color='black', linewidth=2.5)
         
         # Style whiskers and caps
         for whisker in bp['whiskers']:
-            whisker.set(color='black', linewidth=2, linestyle='-')
+            whisker.set(color='black', linewidth=1.5, linestyle='-')
         for cap in bp['caps']:
-            cap.set(color='black', linewidth=2)
+            cap.set(color='black', linewidth=1.5)
         
         # Add grid
-        ax.grid(True, alpha=0.3, axis='y', linestyle='--')
+        ax.grid(True, alpha=0.25, axis='y', linestyle='--')
         ax.set_axisbelow(True)
         
-        # Labels
+        # Labels (更简洁)
         unit_str = f" ({info['unit']})" if info['unit'] else ""
-        ax.set_ylabel(f'{info["label"]}{unit_str}', fontsize=14, fontweight='bold')
-        ax.set_title(f'{info["label"]} Comparison', fontsize=16, fontweight='bold', pad=20)
-        ax.tick_params(axis='both', labelsize=12)
+        ax.set_ylabel(f'{info["label"]}{unit_str}', fontsize=16)
+        ax.set_title(info["label"], fontsize=18, pad=20)
+        ax.tick_params(axis='both', labelsize=14)
         
         # Remove top and right spines
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
+        ax.spines['left'].set_linewidth(1.5)
+        ax.spines['bottom'].set_linewidth(1.5)
         
         plt.tight_layout()
         filename = f'{save_path}/{metric}_box_plot.png'
@@ -549,13 +543,13 @@ def generate_summary_statistics(df):
     
     # All possible metrics
     all_metrics = {
-        'rmsd': ('RMSD (Angstrom)', 'lower'),
-        'tm_score': ('TM-Score (d0=5.0)', 'higher'),
+        'rmsd': ('RMSD (Å)', 'lower'),
+        'tm_score': ('TM-score', 'higher'),
         'gdt_ts': ('GDT-TS', 'higher'),
         'gdt_ha': ('GDT-HA', 'higher'),
-        'maxsub': ('MaxSub Score', 'higher'),
-        'lddt': ('lDDT Score', 'higher'),
-        'clash_score': ('Clash Score', 'lower')
+        'maxsub': ('MaxSub', 'higher'),
+        'lddt': ('lDDT', 'higher'),
+        'clash_score': ('Clash score', 'lower')
     }
     
     # Filter to available metrics

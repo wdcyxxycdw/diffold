@@ -39,13 +39,30 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-# 支持的指标及其正式名称
+# 设置字体和样式 - 学术论文标准
+plt.rcParams['font.family'] = 'Arial'
+plt.rcParams['font.size'] = 11
+plt.rcParams['axes.unicode_minus'] = False
+plt.rcParams['axes.linewidth'] = 1.2
+plt.rcParams['xtick.major.width'] = 1.2
+plt.rcParams['ytick.major.width'] = 1.2
+plt.rcParams['xtick.major.size'] = 5
+plt.rcParams['ytick.major.size'] = 5
+
+# 专业学术配色方案（与 compare_models.py 一致）
+MODEL_COLORS = {
+    'Diffold': '#4472C4',      # 专业蓝色
+    'RhoFold': '#ED7D31',      # 专业橙色
+    'RhoFold+': '#ED7D31',     # 兼容变体
+}
+
+# 支持的指标及其正式名称（统一格式）
 METRICS = ["tm_score", "lddt", "gdt_ts", "rmsd"]
 METRIC_NAME_MAP = {
     "tm_score": "TM-score",
     "lddt": "lDDT",
     "gdt_ts": "GDT-TS",
-    "rmsd": "RMSD",
+    "rmsd": "RMSD (Å)",
 }
 
 
@@ -127,8 +144,7 @@ def plot_length_performance(
     """
     models = sorted(df["model"].unique())
 
-    plt.figure(figsize=tuple(figsize))
-    cmap = plt.get_cmap("tab10")
+    fig, ax = plt.subplots(figsize=tuple(figsize))
     legend_entries = []
 
     for idx, model in enumerate(models):
@@ -139,16 +155,18 @@ def plot_length_performance(
         x = sub["seq_len"].values.astype(float)
         y = sub[metric].values.astype(float)
 
-        color = cmap(idx % 10)
+        # 使用统一的配色方案
+        color = MODEL_COLORS.get(model, f'C{idx}')
 
         # 散点
-        plt.scatter(
+        ax.scatter(
             x,
             y,
-            s=35,
-            alpha=0.7,
+            s=40,
+            alpha=0.6,
             color=color,
-            edgecolor="none",
+            edgecolor='black',
+            linewidth=0.5,
             label=model,
         )
 
@@ -157,12 +175,12 @@ def plot_length_performance(
             slope, intercept, r_value, p_value, _ = stats.linregress(x, y)
             x_line = np.linspace(x.min(), x.max(), 100)
             y_line = slope * x_line + intercept
-            plt.plot(
+            ax.plot(
                 x_line,
                 y_line,
                 color=color,
-                linewidth=2,
-                alpha=0.9,
+                linewidth=2.5,
+                alpha=0.8,
             )
             legend_entries.append(
                 f"{model}: slope={slope:.4f}, r={r_value:.3f}, p={p_value:.1e}"
@@ -173,25 +191,30 @@ def plot_length_performance(
     # 指标名美化
     pretty_metric = METRIC_NAME_MAP.get(metric, metric)
 
-    plt.xlabel("Sequence length (seq_len)", fontsize=12)
-    plt.ylabel(pretty_metric, fontsize=12)
-    plt.title(f"Sequence length vs {pretty_metric}", fontsize=13, fontweight="bold")
-    plt.grid(alpha=0.3, linestyle="--")
-    # 调整底部空间，让文本框更靠近图表（从 0.15 改为 0.08）
-    plt.tight_layout(rect=[0, 0.08, 1, 1])
+    ax.set_xlabel("Sequence length", fontsize=13)
+    ax.set_ylabel(pretty_metric, fontsize=13)
+    ax.set_title(f"Sequence length vs {pretty_metric}", fontsize=14, pad=15)
+    ax.grid(alpha=0.25, linestyle='--', axis='y')
+    ax.set_axisbelow(True)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['left'].set_linewidth(1.2)
+    ax.spines['bottom'].set_linewidth(1.2)
+    ax.tick_params(axis='both', labelsize=11)
 
-    # 图例信息放在图外底部，但更靠近图表区域
+    # 图例信息放在图外底部
     text = "\n".join(legend_entries)
-    plt.gcf().text(
+    fig.text(
         0.5,
-        0.04,  # 从 0.02 调整到 0.04，更靠近图表底部
+        0.02,
         text,
         ha="center",
         va="bottom",
         fontsize=9,
-        bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.6),
+        bbox=dict(boxstyle="round", facecolor="white", alpha=0.8, edgecolor='gray', linewidth=1),
     )
 
+    plt.tight_layout(rect=[0, 0.08, 1, 1])
     output.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(output, dpi=300, bbox_inches="tight")
     plt.close()
@@ -231,12 +254,14 @@ def plot_length_performance_grid(
 ) -> None:
     """绘制 2x2 子图的汇总图：长度 vs TM-score / lDDT / GDT-TS / RMSD。"""
     models = sorted(df["model"].unique())
-    cmap = plt.get_cmap("tab10")
-
+    
     fig, axes = plt.subplots(2, 2, figsize=tuple(figsize))
     axes = axes.reshape(-1)
+    
+    # 子图标号
+    panel_labels = ['(a)', '(b)', '(c)', '(d)']
 
-    for ax, metric in zip(axes, METRICS):
+    for panel_idx, (ax, metric) in enumerate(zip(axes, METRICS)):
         pretty_metric = METRIC_NAME_MAP.get(metric, metric)
         legend_entries: List[str] = []
 
@@ -247,16 +272,19 @@ def plot_length_performance_grid(
 
             x = sub["seq_len"].values.astype(float)
             y = sub[metric].values.astype(float)
-            color = cmap(idx % 10)
+            
+            # 使用统一的配色方案
+            color = MODEL_COLORS.get(model, f'C{idx}')
 
             # 只在第一个子图上加图例项，后面用全局 legend
             ax.scatter(
                 x,
                 y,
-                s=20,
-                alpha=0.7,
+                s=25,
+                alpha=0.6,
                 color=color,
-                edgecolor="none",
+                edgecolor='black',
+                linewidth=0.3,
                 label=model if metric == METRICS[0] else None,
             )
 
@@ -268,28 +296,39 @@ def plot_length_performance_grid(
                     x_line,
                     y_line,
                     color=color,
-                    linewidth=1.8,
-                    alpha=0.9,
+                    linewidth=2.0,
+                    alpha=0.8,
                 )
                 legend_entries.append(
                     f"{model}: r={r_value:.3f}, p={p_value:.1e}"
                 )
 
-        ax.set_xlabel("Sequence length (seq_len)", fontsize=11)
-        ax.set_ylabel(pretty_metric, fontsize=11)
-        ax.set_title(f"Sequence length vs {pretty_metric}", fontsize=12, fontweight="bold")
-        ax.grid(alpha=0.3, linestyle="--")
+        ax.set_xlabel("Sequence length", fontsize=12)
+        ax.set_ylabel(pretty_metric, fontsize=12)
+        ax.set_title(pretty_metric, fontsize=13, pad=12)
+        ax.grid(alpha=0.25, linestyle='--', axis='y')
+        ax.set_axisbelow(True)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.spines['left'].set_linewidth(1.2)
+        ax.spines['bottom'].set_linewidth(1.2)
+        ax.tick_params(axis='both', labelsize=10)
+        
+        # 添加子图标号
+        ax.text(-0.12, 1.05, panel_labels[panel_idx], transform=ax.transAxes,
+               fontsize=14, fontweight='bold', va='top', ha='right')
 
         if legend_entries:
             ax.text(
                 0.98,
-                0.02,
+                0.03,
                 "\n".join(legend_entries),
                 transform=ax.transAxes,
                 ha="right",
                 va="bottom",
-                fontsize=7,
-                bbox=dict(boxstyle="round", facecolor="white", alpha=0.7),
+                fontsize=7.5,
+                bbox=dict(boxstyle="round", facecolor="white", alpha=0.85, 
+                         edgecolor='gray', linewidth=0.8),
             )
 
     # 全局图例：基于第一个子图
@@ -300,11 +339,14 @@ def plot_length_performance_grid(
             labels,
             loc="upper center",
             ncol=len(models),
-            fontsize=9,
-            frameon=False,
+            fontsize=11,
+            frameon=True,
+            fancybox=False,
+            edgecolor='black',
+            framealpha=0.9,
         )
 
-    plt.tight_layout(rect=[0.05, 0.05, 0.98, 0.9])
+    plt.tight_layout(rect=[0.02, 0.02, 0.98, 0.94])
     output.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(output, dpi=300, bbox_inches="tight")
     plt.close()

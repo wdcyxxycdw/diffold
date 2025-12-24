@@ -155,7 +155,7 @@ def main():
     parser.add_argument(
         '--max-iter',
         type=int,
-        default=1000,
+        default=500,
         help='最大迭代次数 (默认: 4000)'
     )
     
@@ -238,14 +238,31 @@ def main():
             
             # 准备任务列表
             tasks = []
+            skipped_count = 0
             for i, pdb_file in enumerate(pdb_files):
                 base_name = pdb_file.stem
                 out_name = f"{base_name}{args.suffix}.pdb"
                 out_path = output_dir / out_name
                 
+                # 跳过已存在的文件（断点续传）
+                if out_path.exists():
+                    logger.info(f"跳过已存在: {out_name}")
+                    skipped_count += 1
+                    continue
+                
                 # 分配worker ID (循环分配，CPU模式下只是标识符)
                 worker_id = i % args.num_workers
                 tasks.append((str(pdb_file), str(out_path), args.max_iter, args.gpu, worker_id))
+            
+            if skipped_count > 0:
+                logger.info(f"已跳过 {skipped_count} 个已处理的文件")
+            
+            if not tasks:
+                logger.info("所有文件都已处理完成！")
+                sys.exit(0)
+            
+            logger.info(f"剩余待处理: {len(tasks)} 个文件")
+            logger.info("")
             
             # 使用进程池并行处理
             with Pool(processes=args.num_workers) as pool:
@@ -254,6 +271,7 @@ def main():
             # 统计结果
             success_count = sum(1 for _, success in results if success)
             failed_count = len(results) - success_count
+            total_processed = success_count + failed_count + skipped_count
             
         else:
             # 单进程串行处理
@@ -265,14 +283,21 @@ def main():
             
             success_count = 0
             failed_count = 0
+            skipped_count = 0
             
             for i, pdb_file in enumerate(pdb_files, 1):
-                logger.info(f"[{i}/{len(pdb_files)}] 处理中...")
-                
                 # 生成输出文件名
                 base_name = pdb_file.stem
                 out_name = f"{base_name}{args.suffix}.pdb"
                 out_path = output_dir / out_name
+                
+                # 跳过已存在的文件（断点续传）
+                if out_path.exists():
+                    logger.info(f"[{i}/{len(pdb_files)}] 跳过已存在: {out_name}")
+                    skipped_count += 1
+                    continue
+                
+                logger.info(f"[{i}/{len(pdb_files)}] 处理中...")
                 
                 # 处理文件
                 if relax_single_file(str(pdb_file), str(out_path), args.max_iter, args.gpu):
@@ -281,13 +306,17 @@ def main():
                     failed_count += 1
                 
                 logger.info("")
+            
+            total_processed = success_count + failed_count + skipped_count
         
         # 统计结果
         elapsed = datetime.now() - start_time
         logger.info("="*70)
         logger.info("批量处理完成！")
-        logger.info(f"  成功: {success_count}/{len(pdb_files)}")
-        logger.info(f"  失败: {failed_count}/{len(pdb_files)}")
+        logger.info(f"  总文件数: {len(pdb_files)}")
+        logger.info(f"  成功: {success_count}")
+        logger.info(f"  失败: {failed_count}")
+        logger.info(f"  跳过: {skipped_count}")
         logger.info(f"  耗时: {elapsed}")
         logger.info("="*70)
         

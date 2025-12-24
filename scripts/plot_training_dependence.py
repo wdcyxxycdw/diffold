@@ -168,6 +168,15 @@ def prepare_combined_data(similarity_files, prediction_files, dataset_names=None
 def plot_training_dependence(combined_df, output_path, figsize, dpi, model_name):
     """绘制训练集依赖性分析图"""
     
+    # 设置学术化样式
+    plt.rcParams['font.family'] = 'Arial'
+    plt.rcParams['font.size'] = 11
+    plt.rcParams['axes.linewidth'] = 1.2
+    plt.rcParams['xtick.major.width'] = 1.2
+    plt.rcParams['ytick.major.width'] = 1.2
+    plt.rcParams['xtick.major.size'] = 5
+    plt.rcParams['ytick.major.size'] = 5
+    
     # 创建图形，增加底部空间用于显示统计信息
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
     # 调整子图位置，为底部留出空间，同时优化整体布局
@@ -280,6 +289,142 @@ def print_statistics(combined_df):
                                                   combined_df['tm_score'])
     print(f"  Spearman相关系数: {spearman_corr:.4f}")
     print(f"  P值: {spearman_p:.4e}")
+
+
+def plot_combined_comparison(diffold_df, rhofold_df, output_path, figsize=(16, 10), dpi=300):
+    """绘制Diffold和RhoFold的合并对比图（2x2布局）"""
+    
+    # 设置学术化样式
+    plt.rcParams['font.family'] = 'Arial'
+    plt.rcParams['font.size'] = 11
+    plt.rcParams['axes.linewidth'] = 1.2
+    plt.rcParams['xtick.major.width'] = 1.2
+    plt.rcParams['ytick.major.width'] = 1.2
+    plt.rcParams['xtick.major.size'] = 5
+    plt.rcParams['ytick.major.size'] = 5
+    
+    # 创建2x2子图
+    fig, axes = plt.subplots(2, 2, figsize=figsize)
+    axes = axes.flatten()
+    
+    # 定义分类顺序
+    category_order = ['x < 0.25', '0.25 ≤ x < 0.50', '0.50 ≤ x < 0.75', 'x ≥ 0.75']
+    
+    # 模型数据和名称
+    models = [
+        (diffold_df, 'Diffold', '#4472C4'),  # 专业蓝色
+        (rhofold_df, 'RhoFold+', '#ED7D31')  # 专业橙色
+    ]
+    
+    panel_labels = ['(a)', '(b)', '(c)', '(d)']
+    
+    for idx, (combined_df, model_name, color) in enumerate(models):
+        ax_violin = axes[idx * 2]
+        ax_scatter = axes[idx * 2 + 1]
+        
+        # === 左图：小提琴图 ===
+        parts = ax_violin.violinplot(
+            [combined_df[combined_df['tm_score_category'] == cat]['tm_score'].values 
+             for cat in category_order],
+            positions=range(len(category_order)),
+            showmeans=False,
+            showmedians=False,
+            widths=0.7
+        )
+        
+        # 设置小提琴图颜色
+        for pc in parts['bodies']:
+            pc.set_facecolor(color)
+            pc.set_alpha(0.6)
+            pc.set_edgecolor('black')
+            pc.set_linewidth(1.0)
+        
+        # 添加箱线图叠加
+        bp = ax_violin.boxplot(
+            [combined_df[combined_df['tm_score_category'] == cat]['tm_score'].values 
+             for cat in category_order],
+            positions=range(len(category_order)),
+            widths=0.15,
+            patch_artist=False,
+            showfliers=False,
+            showcaps=False,
+            whiskerprops=dict(linewidth=1.5, color='black'),
+            boxprops=dict(linewidth=1.5, color='black'),
+            medianprops=dict(linewidth=2.0, color='black')
+        )
+        
+        ax_violin.set_xticks(range(len(category_order)))
+        ax_violin.set_xticklabels(category_order, rotation=0, fontsize=10)
+        ax_violin.set_xlabel('Training set TM-score category', fontsize=12)
+        ax_violin.set_ylabel('TM-score', fontsize=12)
+        ax_violin.set_title(f'{model_name}', fontsize=13, pad=12)
+        ax_violin.grid(axis='y', alpha=0.25, linestyle='--')
+        ax_violin.set_axisbelow(True)
+        ax_violin.spines['top'].set_visible(False)
+        ax_violin.spines['right'].set_visible(False)
+        ax_violin.spines['left'].set_linewidth(1.2)
+        ax_violin.spines['bottom'].set_linewidth(1.2)
+        
+        # 添加面板标签
+        ax_violin.text(-0.15, 1.05, panel_labels[idx * 2], transform=ax_violin.transAxes,
+                      fontsize=14, fontweight='bold', va='top', ha='right')
+        
+        # === 右图：散点图 ===
+        # 计算相关系数
+        corr, p_value = stats.pearsonr(combined_df['max_tm_score'], combined_df['tm_score'])
+        
+        ax_scatter.scatter(combined_df['max_tm_score'], combined_df['tm_score'], 
+                          alpha=0.6, s=40, color=color, edgecolor='black', linewidth=0.5)
+        
+        # 添加回归线
+        z = np.polyfit(combined_df['max_tm_score'], combined_df['tm_score'], 1)
+        p = np.poly1d(z)
+        x_line = np.linspace(combined_df['max_tm_score'].min(), 
+                            combined_df['max_tm_score'].max(), 100)
+        ax_scatter.plot(x_line, p(x_line), color='darkred', alpha=0.8, linewidth=2.5)
+        
+        # 添加置信区间
+        predict_y = p(combined_df['max_tm_score'])
+        pred_error = combined_df['tm_score'] - predict_y
+        degrees_of_freedom = len(combined_df['max_tm_score']) - 2
+        residual_std_error = np.sqrt(np.sum(pred_error**2) / degrees_of_freedom)
+        
+        x_mean = np.mean(combined_df['max_tm_score'])
+        sxx = np.sum((combined_df['max_tm_score'] - x_mean)**2)
+        confidence = 0.95
+        t_val = stats.t.ppf((1 + confidence) / 2, degrees_of_freedom)
+        
+        confs = t_val * residual_std_error * np.sqrt(1/len(combined_df['max_tm_score']) + 
+                                                       (x_line - x_mean)**2 / sxx)
+        
+        ax_scatter.fill_between(x_line, p(x_line) - confs, p(x_line) + confs, 
+                               alpha=0.2, color='darkred')
+        
+        ax_scatter.set_xlabel('Training set TM-score', fontsize=12)
+        ax_scatter.set_ylabel('TM-score', fontsize=12)
+        ax_scatter.set_title(f'{model_name}', fontsize=13, pad=12)
+        ax_scatter.grid(alpha=0.25, linestyle='--')
+        ax_scatter.set_axisbelow(True)
+        ax_scatter.spines['top'].set_visible(False)
+        ax_scatter.spines['right'].set_visible(False)
+        ax_scatter.spines['left'].set_linewidth(1.2)
+        ax_scatter.spines['bottom'].set_linewidth(1.2)
+        
+        # 添加面板标签
+        ax_scatter.text(-0.15, 1.05, panel_labels[idx * 2 + 1], transform=ax_scatter.transAxes,
+                       fontsize=14, fontweight='bold', va='top', ha='right')
+        
+        # 在图内添加相关系数
+        ax_scatter.text(0.05, 0.95, f'r = {corr:.3f}, p = {p_value:.1e}', 
+                       transform=ax_scatter.transAxes, fontsize=10,
+                       verticalalignment='top',
+                       bbox=dict(boxstyle='round', facecolor='white', alpha=0.8, 
+                                edgecolor='gray', linewidth=0.8))
+    
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=dpi, bbox_inches='tight')
+    print(f"\n合并图片已保存到: {output_path}")
+    plt.close()
 
 
 def main():

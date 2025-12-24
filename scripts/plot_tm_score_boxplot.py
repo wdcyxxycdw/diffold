@@ -63,17 +63,20 @@ def beautify_model_name(model_name):
         'af3': 'AF3',
         'boltz': 'Boltz-1',
         'chai': 'Chai',
+        'diffold': 'Diffold',
         'hf3': 'HF3',
         'nufold': 'NuFold',
         'rf2na': 'RF2NA',
         'rhofold': 'RhoFold+',
         'trrosetta': 'trRosettaRNA',
-        # DiffFold 单模型评估目录
-        'evaluation_results_d0=5': 'DiffFold',
+        # Diffold 单模型评估目录
+        'evaluation_results_d0=5': 'Diffold',
+        'evaluation_results': 'Diffold',
         # 兼容旧的 tm_* 命名
         'tm_af3': 'AF3',
         'tm_boltz': 'Boltz-1',
         'tm_chai': 'Chai',
+        'tm_diffold': 'Diffold',
         'tm_hf3': 'HF3',
         'tm_nufold': 'NuFold',
         'tm_rf2na': 'RF2NA',
@@ -105,62 +108,65 @@ def plot_boxplot(data_dict, output_path=None, title="Performance on Single RNA")
         'TM-score': plot_data
     })
     
-    # 设置matplotlib参数以获得更好的样式
+    # 设置matplotlib参数 - 学术论文标准
     plt.rcParams.update({
+        'font.family': 'Arial',
         'font.size': 11,
-        'font.family': 'sans-serif',
-        'font.sans-serif': ['Arial', 'DejaVu Sans', 'Liberation Sans'],
         'axes.linewidth': 1.2,
         'axes.spines.top': False,
         'axes.spines.right': False,
         'xtick.major.width': 1.2,
         'ytick.major.width': 1.2,
+        'xtick.major.size': 5,
+        'ytick.major.size': 5,
         'figure.dpi': 300,
     })
     
     # 创建图形，使用更大的尺寸以获得更好的视觉效果
-    fig, ax = plt.subplots(figsize=(14, 7))
+    fig, ax = plt.subplots(figsize=(12, 6))
     
-    # 绘制box plot，使用更专业的样式（类似参考图的浅蓝色）
+    # 绘制box plot，使用学术化样式
     box_plot = sns.boxplot(
         data=df_plot, 
         x='Model', 
         y='TM-score', 
         ax=ax,
         width=0.6,
-        linewidth=1.5,
-        fliersize=4,
+        linewidth=1.2,
+        fliersize=3,
         flierprops=dict(
             marker='o',
             markerfacecolor='gray',
-            markeredgecolor='gray',
-            markersize=4,
-            alpha=0.6
+            markeredgecolor='black',
+            markersize=3,
+            alpha=0.5,
+            linewidth=0.5
         ),
         boxprops=dict(
-            facecolor='#87CEEB',  # Sky blue
-            edgecolor='#4682B4',  # Steel blue
-            linewidth=1.5,
-            alpha=0.8
+            facecolor='#4472C4',  # 专业蓝色
+            edgecolor='black',
+            linewidth=1.2,
+            alpha=0.7
         ),
         medianprops=dict(
-            color='#1E90FF',  # Dodger blue
-            linewidth=2
+            color='black',
+            linewidth=2.0
         ),
         whiskerprops=dict(
-            color='#4682B4',
-            linewidth=1.5
+            color='black',
+            linewidth=1.2
         ),
         capprops=dict(
-            color='#4682B4',
-            linewidth=1.5
+            color='black',
+            linewidth=1.2
         )
     )
     
     # 设置标题和标签
-    ax.set_title(title, fontsize=16, fontweight='bold', pad=20)
-    ax.set_xlabel('Model', fontsize=13, fontweight='medium')
-    ax.set_ylabel('TM-Score', fontsize=13, fontweight='medium')
+    if title:  # 只在标题不为空时显示
+        ax.set_title(title, fontsize=16, pad=20)
+    ax.set_xlabel('Model', fontsize=13)
+    ax.set_ylabel('TM-score', fontsize=13)
     ax.set_ylim(0, 1.05)
     
     # 设置y轴刻度
@@ -170,16 +176,22 @@ def plot_boxplot(data_dict, output_path=None, title="Performance on Single RNA")
     # 旋转x轴标签以避免重叠，并设置字体大小
     plt.xticks(rotation=45, ha='right', fontsize=11)
     
-    # 添加水平网格线（仅y轴方向）
-    ax.grid(True, alpha=0.3, axis='y', linestyle='--', linewidth=0.8)
+    # 添加水平网格线（仅y轴方向）- 学术化风格
+    ax.grid(True, alpha=0.25, axis='y', linestyle='--', linewidth=0.8)
     ax.set_axisbelow(True)
+    
+    # 设置spine样式
+    ax.spines['left'].set_linewidth(1.2)
+    ax.spines['bottom'].set_linewidth(1.2)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
     
     # 设置背景色为白色
     ax.set_facecolor('white')
     fig.patch.set_facecolor('white')
     
     # 调整布局，增加底部边距以容纳旋转的标签
-    plt.tight_layout(rect=[0, 0.05, 1, 0.98])
+    plt.tight_layout()
     
     # 保存或显示
     if output_path:
@@ -249,8 +261,8 @@ def main():
     parser.add_argument(
         '--title',
         type=str,
-        default='TM-score Box Plot',
-        help='图表标题（默认：TM-score Box Plot）'
+        default='',
+        help='图表标题（默认：无标题）'
     )
     
     parser.add_argument(
