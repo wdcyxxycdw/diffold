@@ -27,3 +27,40 @@ output_finetune/
 checkpoints_finetune/
 results/
 USalign/
+
+# Local workspace / agent files
+.openclaw/
+AGENTS.md
+BOOTSTRAP.md
+HEARTBEAT.md
+IDENTITY.md
+MEMORY.md
+SOUL.md
+TOOLS.md
+USER.md
+memory/
+
+# Editor / OS artifacts
+.DS_Store
+.idea/
+.cursor/
+*.swp
+*.swo
+
+# Python tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+*.egg-info/
+
+# Local environment files
+.env
+.env.*
+.python-version
+
+# Downloaded local tools
+tools/ncbi-blast-2.15.0+/
+tools/ncbi-blast-2.15.0+-x64-linux.tar.gz
