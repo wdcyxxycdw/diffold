@@ -1,0 +1,101 @@
+\newcommand{\AlgHeader}[1]{\Statex \textit{\# #1}}
+
+\begin{algorithm}
+\caption{Diffusion Module}
+\label{alg:diffusion_module}
+\begin{algorithmic}[1]
+
+\Statex $ \begin{aligned} \textbf{def} \,\,  \text{DiffusionModule}(
+&\{\mathbf{x}^{\text{noisy}}_{\ell}\},\, t,\, \{\mathbf{f}^*\},
+\{\mathbf{s}^{\text{inputs}}_i\},\, \{\mathbf{s}^{\text{trunk}}_i\},
+\{\mathbf{z}^{\text{trunk}}_{ij}\},\\
+&\sigma_{\text{data}}=16,\,
+c_{\text{atom}}=128,
+c_{\text{atompair}}=16,\,
+c_{\text{token}}=768):
+\end{aligned}$
+
+
+\Statex
+
+\AlgHeader{Conditioning}
+\State
+$\{\mathbf{s}_i\},\, \{\mathbf{z}_{ij}\}
+\gets
+\mathrm{DiffusionConditioning}
+\bigl(
+t,\, \{\mathbf{f}^*\},\, \{\mathbf{s}^{\text{inputs}}_i\},\,
+\{\mathbf{s}^{\text{trunk}}_i\},\, \{\mathbf{z}^{\text{trunk}}_{ij}\},\,
+\sigma_{\text{data}}
+\bigr)$
+
+\AlgHeader{Scale positions to dimensionless vectors with approximately unit variance.}
+\State
+$\mathbf{r}^{\text{noisy}}_{\ell}
+\gets
+\mathbf{x}^{\text{noisy}}_{\ell} \big/ \sqrt{t^2 + \sigma_{\text{data}}^2},
+\qquad
+\mathbf{r}^{\text{noisy}}_{\ell}\in\mathbb{R}^3$
+\Statex
+
+\AlgHeader{Sequence-local Atom Attention and aggregation to coarse-grained tokens}
+\State
+$\{\mathbf{a}_i\},\,
+\{\mathbf{q}^{\text{skip}}_{\ell}\},\,
+\{\mathbf{c}^{\text{skip}}_{\ell}\},\,
+\{\mathbf{p}^{\text{skip}}_{\ell m}\}
+\gets
+\mathrm{AtomAttentionEncoder}
+\bigl(
+\{\mathbf{f}^*\},\,
+\{\mathbf{r}^{\text{noisy}}_{\ell}\},\,
+\{\mathbf{s}^{\text{trunk}}_i\},\,
+\{\mathbf{z}_{ij}\},\,
+c_{\text{atom}},\, c_{\text{atompair}},\, c_{\text{token}}
+\bigr)$
+
+\Statex
+
+\AlgHeader{Full self-attention on token level.}
+\State
+$\mathbf{a}_i \gets \mathbf{a}_i + \mathrm{LinearNoBias}\bigl(\mathrm{LayerNorm}(\mathbf{s}_i)\bigr)$
+\State
+$\{\mathbf{a}_i\}
+\gets
+\mathrm{DiffusionTransformer}
+\bigl(
+\{\mathbf{a}_i\},\, \{\mathbf{s}_i\},\, \{\mathbf{z}_{ij}\},\,
+\beta_{ij}=0,\,
+N_{\text{block}}=24,\,
+N_{\text{head}}=16
+\bigr)$
+\State
+$\mathbf{a}_i \gets \mathrm{LayerNorm}(\mathbf{a}_i)$
+
+\AlgHeader{Broadcast token activations to atoms and run Sequence-local Atom Attention}
+\State
+$\{\mathbf{r}^{\text{update}}_{\ell}\}
+\gets
+\mathrm{AtomAttentionDecoder}
+\bigl(
+\{\mathbf{a}_i\},\,
+\{\mathbf{q}^{\text{skip}}_{\ell}\},\,
+\{\mathbf{c}^{\text{skip}}_{\ell}\},\,
+\{\mathbf{p}^{\text{skip}}_{\ell m}\}
+\bigr)$
+
+\AlgHeader{Rescale updates to positions and combine with input positions}
+\State
+$\mathbf{x}^{\text{out}}_{\ell}
+\gets
+\frac{\sigma_{\text{data}}^{2}}{\sigma_{\text{data}}^{2}+t^{2}}\,
+\mathbf{x}^{\text{noisy}}_{\ell}
++
+\sigma_{\text{data}}\, t\,
+\sqrt{\frac{\sigma_{\text{data}}^{2}}{\sigma_{\text{data}}^{2}+t^{2}}}\,
+\mathbf{r}^{\text{update}}_{\ell}$
+
+\State \textbf{return} $\{\mathbf{x}^{\text{out}}_{\ell}\}$
+
+\end{algorithmic}
+\end{algorithm}

@@ -1,0 +1,61 @@
+\chapter{Introduction}
+
+Ribonucleic acid (RNA) performs diverse and essential biological functions, including gene regulation, catalysis, ligand sensing, viral genome packaging, and acting as a structural scaffold within ribonucleoprotein complexes. These functions critically depend on the ability of RNA molecules to fold into well-defined three-dimensional (3D) conformations, involving complex long-range tertiary interactions, non-canonical base-pair geometries, backbone torsion-angle patterns, sugar-pucker states, and metal-ion–mediated contacts. Understanding RNA 3D structure is therefore fundamental not only to elucidating molecular mechanisms, but also to enabling a wide range of biomedical applications such as RNA-targeted therapeutics, siRNA design, ribozyme engineering, gene-editing systems, and mRNA vaccine development.
+
+Experimental techniques such as X-ray crystallography, nuclear magnetic resonance (NMR) spectroscopy, and cryo-electron microscopy (cryo-EM) can provide high-resolution RNA structures, but their applicability is limited. Many RNAs are too flexible to crystallize, NMR analysis is constrained by molecular size, and cryo-EM is mainly suited to large complexes rather than small or moderately sized RNAs. Chemical probing approaches, including SHAPE, DMS, and PARS, offer valuable constraints on secondary structure but cannot directly reveal atomic-resolution tertiary conformations. Consequently, the number of experimentally solved RNA structures remains small compared to proteins, which restricts the availability of high-quality data for training and benchmarking computational models of RNA 3D structure.
+
+Before the rise of deep learning, computational RNA structure prediction relied primarily on thermodynamic modeling and free-energy minimization. Classical algorithms such as MFold, ViennaRNA (RNAfold), and RNAstructure employ dynamic programming to estimate minimum free-energy secondary structures under the Turner nearest-neighbor parameters, and have been widely used for predicting base-pairing patterns and analyzing thermodynamic ensembles\cite{Zuker2003Mfold, Lorenz2011ViennaRNA, Reuter2010RNAstructure}. Although extensions such as partition-function calculations and stochastic context-free grammars allow ensemble-based reasoning and base-pair probability estimation, these methods fundamentally operate at the secondary-structure level and cannot explicitly capture tertiary interactions, complex motifs, pseudoknots (without substantial simplification), or detailed backbone geometry. As a result, traditional thermodynamic approaches provide only limited insight into the full 3D conformational landscape of RNA molecules.
+
+In recent years, deep learning has substantially reshaped RNA secondary structure prediction. Methods such as SPOT-RNA, MXfold2, and UFold learn base-pairing rules directly from data, integrating convolutional or transformer-based architectures with thermodynamic priors or image-like representations of base-pair matrices, and consistently outperform classical thermodynamic models on within-family and cross-family benchmarks\cite{Singh2019SPOTRNA, Sato2021MXfold2, Fu2022UFold}. These approaches demonstrate that data-driven models can capture non-trivial base-pairing patterns, including non-canonical and long-range interactions, thereby providing more accurate secondary structure inputs for downstream 3D modeling.
+
+A major class of methods for RNA 3D structure prediction is template-assembly–based modeling. The Rosetta FARFAR and FARFAR2 frameworks assemble RNA structures by recombining experimentally derived or computationally sampled fragments and refining them with an all-atom energy function\cite{Watkins2020FARFAR2}. These methods have shown strong performance in RNA-Puzzles challenges and can produce high-quality models for certain families, especially when homologous templates or motifs are available. Similarly, RNAComposer employs module-based assembly using a library of recurrent structural motifs, enabling rapid generation of coarse-grained 3D structures that approximate native folds\cite{Biesiada2016RNAComposerProtocol}. However, fragment-based approaches depend heavily on template availability and struggle with novel motifs, large conformational variability, and RNAs lacking homologous structures.
+
+And another important class of methods for RNA 3D structure prediction is deep-learning-based modeling. DRfold integrates end-to-end learning of local frames with geometric restraints to assemble RNA 3D structures, combining learned potentials with energy-based refinement\cite{Li2023DRfold}. trRosettaRNA extends the successful trRosetta framework from proteins to RNA, using transformer networks to predict 1D and 2D geometric features such as orientations, distances, and contacts, followed by energy minimization to obtain full-atom models\cite{Wang2023trRosettaRNA}. More recently, RhoFold+ leverages an RNA language model pretrained on tens of millions of RNA sequences together with geometric deep learning modules to achieve state-of-the-art accuracy on RNA-Puzzles and CASP benchmarks\cite{Shen2024RhoFoldPlus}. Although these models substantially improve over classical and homology-based approaches, they still face difficulties in capturing highly flexible regions, rare non-canonical motifs, backbone torsion-angle distributions, and the multiple conformational states that many RNAs can adopt.
+
+The transformative success of AlphaFold2 (AF2) in protein structure prediction has further stimulated efforts to adapt AF2-like architectures to RNA\cite{Jumper2021AlphaFold}. AF2 introduced attention-based pair representations, iterative refinement, and end-to-end differentiable structure modules, enabling near-experimental accuracy for many protein targets. AlphaFold3 (AF3) subsequently incorporated a diffusion-based architecture and unified the modeling of proteins, nucleic acids, small molecules, and other components in macromolecular complexes\cite{Abramson2024AlphaFold3}. However, when applied to RNA-only targets, AF3 and AF2-style pipelines still exhibit limited accuracy: several recent evaluations report unrealistic sugar-pucker conformations, incorrect non-canonical base-pair geometries, and frequent steric clashes in the RNA backbone, reflecting the fact that these models are trained predominantly on protein-centric datasets and are not explicitly optimized for RNA-specific geometric constraints.
+
+In parallel, two methodological developments have opened new possibilities for RNA modeling: RNA language models and diffusion-based generative models. RNA foundation models such as RNA-FM learn contextual representations from tens of millions of unannotated RNA sequences via self-supervised learning and have been shown to capture structural and functional information useful for downstream tasks\cite{Chen2022RNAFM}. RNABERT and related models further demonstrate that pretraining on nucleotide sequences can encode base-level features relevant to clustering and structural alignment\cite{Akiyama2022RNABERT}. On the generative side, diffusion models have emerged as a powerful framework for molecular structure generation. Recent work on protein structure generation via folding diffusion and related approaches shows that diffusion models can produce realistic protein backbones and conformational ensembles, while maintaining physical plausibility through carefully designed noise processes and geometric parameterizations\cite{Yim2024DiffusionReview, Wu2024FoldingDiffusion}. These advances suggest that combining RNA-specific language model embeddings with diffusion-based generative modeling may provide a flexible and physically grounded strategy for RNA 3D structure prediction.
+
+In conclusion, existing experimental and computational approaches still fall short of providing accurate and generalizable RNA 3D structure predictions across diverse families and sequence lengths. Thermodynamic methods are restricted to the secondary structure, discriminative deep learning models struggle with conformational heterogeneity and rare tertiary motifs, and AF2-style architectures are limited by protein-centric training data and RNA-specific geometric differences. Motivated by these challenges and by recent progress in RNA language models and diffusion-based generative modeling, this study aims to develop a diffusion structural model tailored specifically for RNA 3D structure prediction. The proposed framework is designed to integrate RNA language model embeddings as structural priors and to explore RNA conformational space through a diffusion process that respects RNA geometry and chemical constraints, with the ultimate goal of improving geometric accuracy, capturing diverse tertiary motifs, and enhancing generalization across RNA families.
+
+\bigskip
+
+In this thesis, we propose a diffusion-based generative model for RNA three-dimensional structure prediction. The model builds upon the geometric backbone of RhoFold+, integrates structural priors provided by the large-scale RNA language model RNA-FM, and employs the Elucidated Diffusion Model (EDM) as the core generative mechanism to construct physically plausible RNA 3D conformations\cite{Karras2022EDM}.
+
+\noindent{The main contributions of this thesis are:}
+
+\begin{enumerate}
+    \item {A diffusion-based generative model Diffold for RNA tertiary structure prediction}, 
+          integrating RNA-FM structural priors, the RhoFold+ geometric backbone, and 
+          the Elucidated Diffusion Model (EDM) for physically consistent structure generation.
+
+    \item {A full RNA-oriented diffusion architecture} featuring:
+    \begin{itemize}
+        \item An EDM-based structural generation module;
+        \item An RNA-specific denoising network designed to incorporate atomic chemical features;
+    \end{itemize}
+
+    \item {Comprehensive experimental validations} on CASP16 RNA targets and the RNA-Benchmark dataset:
+    \begin{itemize}
+        \item Systematic comparisons against state-of-the-art RNA tertiary structure predictors;
+        \item Evaluation of the effects and limits of diffusion-based generative modeling for RNA structures.
+    \end{itemize}
+\end{enumerate}
+
+\bigskip
+
+\noindent{The remainder of this thesis is organized as follows:}
+
+\begin{itemize}
+    \item{Chapter 2} presents the overall methodology, including RNA-FM sequence representation, 
+          the RhoFold+ backbone, the Elucidated Diffusion Model, and the RNA-specific denoising architecture.
+
+    \item{Chapter 3} describes the datasets used in this study (CASP16 and RNA-Benchmark)\cite{Ludaic2025limits}, 
+          baseline models, evaluation metrics, and experimental settings.
+
+    \item{Chapter 4} provides experimental results, comparisons with existing approaches, 
+          and detailed analyses of representative prediction cases.
+
+    \item{Chapter 5} concludes the thesis and discusses limitations and future directions, 
+          including potential advancements toward more generalizable RNA generative models.
+\end{itemize}

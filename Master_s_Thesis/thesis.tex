@@ -1,0 +1,70 @@
+\documentclass[a4paper,12pt]{jsbook}
+\renewcommand{\prechaptername}{Chapter~}
+\renewcommand{\postchaptername}{}
+\setlength{\textwidth}{\fullwidth}
+\setlength{\evensidemargin}{\oddsidemargin}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{booktabs}  % 用于专业表格线
+\usepackage{threeparttable}  % 用于表格注释（如果使用tablenotes）
+\usepackage{multirow}  % 用于多行合并（如果需要）
+\usepackage{xcolor}
+\usepackage{thesis}
+\usepackage{makeidx}
+\usepackage{amsmath}
+\usepackage{txfonts, float}
+\usepackage{here}
+\usepackage[dvipdfmx]{graphicx}
+\usepackage[noto-otc, unicode]{pxchfon}
+
+
+
+\begin{document}
+
+% 表紙
+\thesis{
+\scalebox{}{\bf 2026年度} \\
+\scalebox{}{\bf 修\quad 士\quad 論\quad 文}
+}
+\date{2026年1月9日}
+\title{
+    \vspace{1.2zh}
+    \scalebox{0.9}{RNA 3D Structure Prediction by Diffusion Structural Model}\\
+    \scalebox{0.9}{（拡散構造モデルによるRNA立体構造予測）}
+}
+\teacher{\quad 浅井\quad 潔\quad 教授}
+\organization{
+    東京大学大学院新領域創成科学研究科\\
+    メディカル情報生命専攻}
+\author{
+\scalebox{1}{崔 \quad 宇軒} \\
+\scalebox{1}{Cui, Yuxuan}
+}
+
+\maketitle
+
+% 前書き
+\include{abstract}
+\frontmatter
+\renewcommand{\contentsname}{Contents}
+\renewcommand{\bibname}{References} 
+\renewcommand{\refname}{References}
+\tableofcontents
+
+% 本文
+\mainmatter
+
+\include{1.introduction}
+\include{2.method}
+\include{3.dataset_and_training}
+\include{4.result}
+\include{5.conclusion}
+\include{acknowledgement}
+\include{bibliography}
+
+% 後書き
+\backmatter
+\appendix
+
+\printindex
+\end{document}

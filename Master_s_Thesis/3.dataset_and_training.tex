@@ -1,0 +1,165 @@
+\chapter{Datasets and Experiments}
+
+\section{Dataset}
+\subsection{Training Data}
+
+To ensure comparability with existing methods and to minimize performance differences caused by dataset factors, we used the same data source and construction strategy as RhoFold+ for training\cite{Shen2024RhoFoldPlus}. Specifically, experimentally resolved single-chain RNA structures were screened from the Protein Data Bank (PDB) and curated as supervised signals. In the original RhoFold+ study, available RNA structures in the PDB were aggregated using the BGSU representative sets (version 2022-04-13). In this thesis, the training set is kept identical to the publicly released RhoFold+ training data, with the primary goal of enabling fair comparisons with RhoFold+ and related backbone-based approaches.
+
+\subsection{Test Data}
+
+For evaluation, we used two public test sources: the RNA-benchmark dataset and the CASP16 RNA targets. CASP16 included nucleic-acid categories such as RNA/DNA monomers and complexes in the 2024 assessment and released target, submission, and evaluation information through its official website. The RNA-benchmark dataset was introduced in the preprint by Ludaic and Elofsson, which aims to provide a more systematic benchmark for comparing deep learning methods for RNA structure prediction\cite{Ludaic2025limits}.
+
+\subsection{Data Processing}
+
+We reproduced and followed the core preprocessing strategy used in the RhoFold series for redundancy reduction, dataset splitting, and quality control. First, to reduce overfitting risks caused by sequence redundancy within the training set, we clustered RNA sequences using CD-HIT with an 80\% identity threshold\cite{li2006cdhit, fu2012cdhit}. Dataset splitting was performed at the cluster level, preventing highly similar sequences from appearing in both the training and validation sets. Next, we split the clustered data into training and validation sets at a 9:1 ratio. To control computational cost and to match the input range supported by the backbone network, RNA sequences were restricted to lengths between 16 and 256 nucleotides. Because our diffusion model is trained to generate structures directly in all-atom coordinate space, supervision becomes more sensitive to atomic completeness. We therefore applied an additional filter on missing atoms in PDB files and retained only samples with greater than 90\% atomic completeness. After preprocessing, we obtained 8,798 valid samples, including 7,629 for training and 1,169 for validation.
+
+\section{Training}
+
+The proposed model is trained under a supervised learning paradigm, where the training target is the all-atom three-dimensional coordinates of experimentally determined RNA structures. The overall training pipeline is implemented in PyTorch and supports automatic mixed precision as well as multi-GPU distributed data-parallel training. To ensure comparability with the RhoFold+ backbone and to stabilize optimization, we adopt a two-stage architecture during training consisting of a backbone feature extractor and a diffusion-based generator. Specifically, the RhoFold+ Rhoformer backbone serves as the feature extractor and outputs residue-level single representations and pair representations. Conditioned on these features, the diffusion module learns an inverse denoising mapping that recovers the native coordinates from noisy inputs. All experiments are trained on 8 NVIDIA A100 GPUs, with a total training time of approximately three days.
+
+\subsection{Backbone Feature Freezing and Feature Adaptation}
+
+During training, we freeze the parameters of the RhoFold+ backbone and use its residue-level outputs solely as conditional inputs, so that the optimization focuses on learning the generative capability of the diffusion structural module. Let the backbone outputs be the residue-level single representation $\mathbf{s} \in \mathbb{R}^{L \times 256}$ and the pair representation $\mathbf{z} \in \mathbb{R}^{L \times L \times 128}$. Because the token-side channel in the subsequent diffusion module operates in a higher-dimensional hidden space, we introduce a lightweight adapter to map the single representation from 256 to 384 dimensions, and apply normalization before and after the mapping to stabilize the feature distribution:
+
+$$
+\tilde{\mathbf{s}} = \mathrm{Linear}\left(\mathrm{LayerNorm}(\mathbf{s})\right) \in \mathbb{R}^{L \times 384}.  
+$$
+
+The pair representation keeps the dimensionality of 128 and is further normalized by LayerNorm, denoted as $\tilde{\mathbf{z}} = \mathrm{LayerNorm}(\mathbf{z})$, to mitigate distribution shifts across different batches and sequence lengths during training.
+
+\subsection{Loss Function}
+
+The diffusion structural module is trained under the Elucidated Diffusion Model (EDM) framework. For each training sample, the ground-truth all-atom coordinates are denoted as $\mathbf{x}_0 \in \mathbb{R}^{N_{atom} \times 3}$. During training, we sample a noise level $\sigma$ from the noise-level distribution and construct noisy coordinates as
+
+$$
+\mathbf{x} = \mathbf{x}_0 + \sigma \boldsymbol{\epsilon}, \qquad \boldsymbol{\epsilon} \sim \mathcal{N}(\mathbf{0}, \mathbf{I})
+$$
+
+Conditioned on $\mathcal{C}$, which includes atom-level features, atom-pair features, $\tilde{\mathbf{s}}$, $\tilde{\mathbf{z}}$, and masks, the model outputs an estimate of the clean coordinates $\hat{\mathbf{x}}_0 = \mathbf{D}_\theta(\mathbf{x}, \sigma \mid \mathcal{C})$. The core diffusion loss is formulated as a mean squared error in coordinate space and is balanced across noise scales using an EDM-style noise-dependent weighting:
+
+$$
+\mathcal{L}_{\mathrm{diff}}
+=
+\mathbb{E}_{\mathbf{x}_0, \sigma, \boldsymbol{\epsilon}}  
+\left[  
+w(\sigma)  \cdot
+\left|| 
+\mathbf{D}_\theta(\mathbf{x}_0 + \sigma \boldsymbol{\epsilon}, \sigma \mid \mathcal{C})
+-
+\mathbf{x}_0  
+\right||_2^2  
+\right]
+$$
+
+where $w(\sigma)$ is a noise-dependent weighting function used to prevent the training objective from being dominated by a narrow noise regime. In practice, we treat $\mathcal{L}_{\mathrm{diff}}$ as the primary optimization target and assign it a larger weight to emphasize structural generation quality.
+
+In addition to coordinate regression, we incorporate lightweight confidence supervision to encourage the model to learn intermediate representations correlated with structure quality. We formulate confidence prediction for pLDDT, PAE, and PDE as classification tasks by discretizing the continuous targets into predefined bins. For pLDDT, let the discrete label be $y_{\mathrm{plddt}}$ and the predicted logits be $\mathbf{u}_{\mathrm{plddt}}$, and the corresponding cross-entropy loss is
+$$
+\mathcal{L}_{\mathrm{plddt}}
+=
+\mathrm{CE}\left(\mathbf{u}_{\mathrm{plddt}}, y_{\mathrm{plddt}}\right).  
+$$
+PAE and PDE are supervised in an analogous manner using their corresponding bin definitions and cross-entropy losses. The overall confidence loss is defined as
+$$
+\mathcal{L}_{\mathrm{conf}}
+=
+\mathcal{L}_{\mathrm{plddt}} + \mathcal{L}_{\mathrm{pae}} + \mathcal{L}_{\mathrm{pde}} 
+$$
+and is added to the total objective with a small weight to avoid suppressing the main denoising task. An optional distogram supervision term can also be defined as a cross-entropy loss, but it is disabled in our experiments by default (weight set to 0) to emphasize the contribution of the diffusion generation pathway.
+
+The total objective is
+
+$$
+\mathcal{L}
+=
+\lambda_{\mathrm{diff}}\mathcal{L}_{\mathrm{diff}}  
++  
+\lambda_{\mathrm{conf}}\mathcal{L}_{\mathrm{conf}}
+$$
+where $\lambda_{\mathrm{diff}}$ is set to 2.0 and $\lambda_{\mathrm{conf}}$ is set to $1\times 10^{-4}$.
+
+\subsection{Optimization and Learning Rate}
+
+We use AdamW optimizer with an initial learning rate of $5\times 10^{-5}$ and a weight decay of $1\times 10^{-4}$. To improve training stability, gradient clipping is applied with a maximum gradient norm of 1.0. The learning rate follows a warmup cosine annealing schedule: during the first $T_{\mathrm{warm}}=1000$ training steps, the learning rate increases linearly from $0.1\eta_0$ to $\eta_0$; afterwards, it decays following a cosine function to a minimum learning rate $\eta_{\min}$:
+
+$$
+\eta(t)=  
+\begin{cases}  
+0.1\eta_0 + 0.9\eta_0 \cdot \dfrac{t}{T_{\mathrm{warm}}}, & t \le T_{\mathrm{warm}}\\
+\eta_{\min} + \dfrac{1}{2}(\eta_0-\eta_{\min})\left(1+\cos\left(\pi \dfrac{t-T_{\mathrm{warm}}}{T-T_{\mathrm{warm}}}\right)\right), & t > T_{\mathrm{warm}} 
+\end{cases}  
+$$
+where $T$ is the total number of training steps and $\eta_{\min}$ is set to $1\times 10^{-7}$ by default.
+
+\subsection{Batching, Masking, and Numerical Stability}
+
+Because RNA sequences have variable lengths and all-atom representations incur high GPU memory cost, we train with a batch size of 1 and use mask tensors to ensure that padded positions and missing atoms do not contribute to the loss. All input coordinates are centered by subtracting the centroid over valid atoms before entering the diffusion module, thereby removing global translation effects. We enable bfloat16 automatic mixed precision to reduce memory usage and improve throughput, and use distributed data-parallel training in multi-GPU settings to accelerate convergence.
+
+Validation is performed at the end of each epoch by computing the mean validation loss and its components. To prevent overfitting and reduce training cost, we adopt an early stopping strategy based on the validation loss. Training is terminated if the validation loss does not improve for 20 consecutive epochs, and the model checkpoint with the best validation loss is retained.
+
+\section{Performance Evaluation}
+
+\subsection{Metrics}
+\subsubsection{RMSD}
+
+The Root-Mean-Square Deviation (RMSD) quantifies the geometric discrepancy between a predicted structure and the native structure after optimal rigid-body superposition. Given the aligned corresponding coordinates ${\mathbf{y}_i}$ (native) and ${\mathbf{x}_i}$ (prediction), RMSD is defined as  
+$$  
+\mathrm{RMSD}=\sqrt{\frac{1}{N}\sum_{i=1}^{N}\left|\mathbf{R}\mathbf{x}_i+\mathbf{t}-\mathbf{y}_i\right|_2^2},  
+$$  
+where $\mathbf{R}\in SO(3)$ and $\mathbf{t}\in\mathbb{R}^3$ are the optimal rigid transformation minimizing the squared error. RMSD is computed using US-align\cite{zhang2022usalign}. For RNA/DNA, US-align uses the C3$'$ atom as the default representative atom for each nucleotide in alignment and scoring. 
+
+\subsubsection{TM-Score}
+
+The TM-score is a length-normalized metric designed to quantify topological similarity while reducing the strong length dependence and local-error sensitivity of RMSD. Its standard form is  
+$$  
+\mathrm{TM}\text{-}\mathrm{score}=\frac{1}{L_{\mathrm{ref}}}\sum_{i=1}^{L_{\mathrm{ali}}}\frac{1}{1+\left(\frac{d_i}{d_0(L_{\mathrm{ref}})}\right)^2},  
+$$  
+where $d_i$ is the distance of the $i$-th aligned residue (or representative atom) after optimal superposition, $L_{\mathrm{ali}}$ is the alignment length, $L_{\mathrm{ref}}$ is the reference length used for normalization, and $d_0(\cdot)$ is a length-dependent scale factor. TM-score ranges in $(0,1]$, with values closer to 1 indicating higher global fold agreement. In this work, TM-score is obtained directly from US-align and is treated as a primary global similarity metric.
+
+\subsubsection{lDDT}
+
+The local Distance Difference Test (lDDT) is an alignment-free metric that evaluates local geometric consistency\cite{mariani2013lddt}. Using the native structure as reference, lDDT forms a set of local atom pairs within a neighborhood radius and checks whether these reference distances are preserved in the predicted structure. Let $\mathcal{P}$ denote the set of atom pairs satisfying $d_{ij}^{\mathrm{ref}}<R_0$ in the reference. With thresholds ${0.5,1,2,4}\ \text{\AA}$, lDDT can be written as  
+
+$$  
+\mathrm{lDDT}=\frac{1}{|\mathcal{P}|}\sum_{(i,j)\in\mathcal{P}}\frac{1}{4}\sum_{t\in{0.5,1,2,4}}\mathbb{I}\left(\left|d_{ij}^{\mathrm{pred}}-d_{ij}^{\mathrm{ref}}\right|<t\right),  
+$$  
+
+where $R_0$ is commonly set to $15\ \text{\AA}$. We implement lDDT ourselves using Biopython for PDB parsing and distance computation, following the original “local neighborhood + multi-threshold counting” definition. When atoms are missing, scoring is restricted to atom pairs present in both structures to ensure a fair comparison.
+
+\subsubsection{Clash Score}
+
+Clash score assesses stereochemical plausibility by quantifying the density of severe steric overlaps in an all-atom model. In MolProbity, clash score is defined as the number of serious clashes per atom, typically computed after adding hydrogen atoms and performing all-atom contact analysis. In this work, we compute clashes using MolProbity’s probe tool and report clash score, where lower values indicate fewer geometric conflicts and more physically reasonable structures\cite{chen2010molprobity}. 
+
+\subsubsection{GDT-TS}
+
+Global Distance Test–Total Score (GDT-TS) is a global similarity metric defined as the average fraction of residues within multiple distance cutoffs after optimal superposition. Let $P(c)$ be the percentage of residues within cutoff $c\in{1,2,4,8}\ \text{\AA}$, then  
+
+$$  
+\mathrm{GDT}\text{-}\mathrm{TS}=\frac{1}{4}\left(P(1)+P(2)+P(4)+P(8)\right).  
+$$  
+
+We compute GDT-TS using the TMscore program from the Zhang lab, which reports GDT-related scores as part of its structural comparison output\cite{zhang2004tmscore}.
+
+
+\subsubsection{Data Independence}
+
+In addition to accuracy metrics, we report dataset-independence diagnostics to quantify potential redundancy between the training and test sets at both the structural and sequence levels. For each test target $T$, we structurally align it against all training structures ${R_k}$ and compute TM-scores, then define the maximum value as its nearest-neighbor structural similarity to the training set:  
+$$
+\mathrm{Indep}_{\mathrm{struct}}(T)=\max_k\ \mathrm{TM}\text{-}\mathrm{score}(T,R_k).  
+$$
+Higher values indicate that a test target is structurally closer to at least one training example, suggesting a more in-distribution evaluation scenario. The maximum TM-score to the training set approach has been used in RNA structure prediction studies to discuss training-data bias and generalization difficulty \cite{Ludaic2025limits}.
+
+We further quantify sequence-level redundancy by aligning each test sequence $q(T)$ against all training sequences $q(R_k)$ using BLAST. For a BLAST alignment between a query (q) and a training sequence (r), we define an effective similarity that down-weights short local matches by normalizing the number of identical aligned nucleotides by the full query length:  
+
+$$  
+\mathrm{EffSim}(q,r)=\frac{n_{\mathrm{ident}}(q,r)}{|q|},  
+$$
+and define the nearest-neighbor sequence similarity of $T$ to the training set as  
+$$
+\mathrm{Indep}_{\mathrm{seq}}(T)=\max_k\ \mathrm{EffSim}\left(q(T),q(R_k)\right).  
+$$
+Larger $\mathrm{Indep}_{\mathrm{seq}}(T)$ indicates that $T$ has a closer sequence neighbor in the training set, complementing $\mathrm{Indep}_{\mathrm{struct}}(T)$ as a diagnostic for potential train–test redundancy.
+
+\subsection{Evaluation Methods}
+
+RMSD and TM-score are computed using US-align by aligning each predicted structure to the corresponding reference structure and parsing the reported metrics from the program output. US-align supports RNA/DNA structural comparison and, under its default settings, uses the C3$'$ atom as the representative atom of each nucleotide for alignment and scoring, enabling comparable global-fold evaluation across RNAs of varying lengths. GDT-TS is computed using the TMscore program with consistent structure-comparison inputs. lDDT is computed by our Biopython-based implementation: local neighbor atom pairs are defined from the reference structure and multi-threshold distance preservation is evaluated in the prediction. Clash score is computed using MolProbity’s probe tool, typically after adding hydrogens and performing basic structure normalization, and is reported as the number of serious clashes per 1000 atoms. To remain consistent with the post-processing protocol, key metrics can be computed before and after relaxation when necessary to confirm that geometric correction does not materially change the overall accuracy conclusions.
