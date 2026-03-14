@@ -1,0 +1,17 @@
+subset	dataset	model	n	tm_score	rmsd	gdt_ts	lddt	clash_score
+full_common	RNA-benchmark	diffold	43	0.501240	2.478605	0.454928	0.807256	0.003627
+full_common	RNA-benchmark	rhofold	43	0.311821	3.631860	0.320535	0.814337	0.008098
+full_common	casp16	diffold	12	0.818368	1.957500	0.754208	0.966486	0.004123
+full_common	casp16	rhofold	12	0.299478	4.636667	0.286725	0.777193	0.006985
+drop_high_only	RNA-benchmark	diffold	40	0.518402	2.449500	0.468212	0.811974	0.003736
+drop_high_only	RNA-benchmark	rhofold	40	0.289204	3.777750	0.312800	0.806708	0.008159
+drop_high_only	casp16	diffold	11	0.824935	1.983636	0.748555	0.965010	0.004156
+drop_high_only	casp16	rhofold	11	0.279049	4.803636	0.255264	0.761394	0.006832
+drop_fold3_train_suspects	RNA-benchmark	diffold	36	0.538775	2.320000	0.480639	0.863020	0.003437
+drop_fold3_train_suspects	RNA-benchmark	rhofold	36	0.273837	3.832778	0.268831	0.806663	0.007884
+drop_fold3_train_suspects	casp16	diffold	5	0.910348	2.052000	0.726480	0.948136	0.003759
+drop_fold3_train_suspects	casp16	rhofold	5	0.124840	6.398000	0.062200	0.668415	0.003712
+drop_all_high_medium	RNA-benchmark	diffold	34	0.541584	2.349706	0.484679	0.855764	0.003491
+drop_all_high_medium	RNA-benchmark	rhofold	34	0.248531	3.982941	0.262274	0.796138	0.007857
+drop_all_high_medium	casp16	diffold	5	0.910348	2.052000	0.726480	0.948136	0.003759
+drop_all_high_medium	casp16	rhofold	5	0.124840	6.398000	0.062200	0.668415	0.003712

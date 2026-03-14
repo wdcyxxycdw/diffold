@@ -1,0 +1,20 @@
+dataset	sample	risk	nearest_train_like	max_tm	fold_3_status	train_folds	valid_folds	absent_folds	fold_0	fold_1	fold_2	fold_3	fold_4	fold_5	fold_6	fold_7	fold_8	fold_9	reason
+RNA-benchmark	7UCR	high	7jjd_A	0.9512	valid	0,1,2,4,5,6,7,8,9	3	-	train	train	train	valid	train	train	train	train	train	train	TM=0.9512>=0.9
+RNA-benchmark	7UGA	high	7uga_A	1.0000	train	0,1,2,3,5,6,7,8,9	4	-	train	train	train	train	valid	train	train	train	train	train	TM=1.0000>=0.9; full-length BLAST exact match
+RNA-benchmark	8VPV	high	4rzd_A	0.9386	train	0,1,2,3,4,5,6,7,8	9	-	train	train	train	train	train	train	train	train	train	valid	TM=0.9386>=0.9
+RNA-benchmark	7UME	medium	3w3s_B	0.5129	train	0,1,2,3,4,5,7,8,9	6	-	train	train	train	train	train	train	valid	train	train	train	TM=0.5129>=0.5
+RNA-benchmark	8FCS	medium	7da7_C	0.6289	valid	0,1,2,4,5,6,7,8,9	3	-	train	train	train	valid	train	train	train	train	train	train	TM=0.6289>=0.5
+RNA-benchmark	8SP9	medium	6jxm_B	0.5400	train	0,1,2,3,4,6,7,8,9	5	-	train	train	train	train	train	valid	train	train	train	train	TM=0.5400>=0.5
+RNA-benchmark	8UPT	medium	6xzb_g2	0.7443	train	0,1,2,3,4,5,6,8,9	7	-	train	train	train	train	train	train	train	valid	train	train	TM=0.7443>=0.5
+RNA-benchmark	8V1I	medium	1asy_S	0.5573	train	0,1,2,3,4,5,6,7,9	8	-	train	train	train	train	train	train	train	train	valid	train	TM=0.5573>=0.5
+RNA-benchmark	8VT5	medium	6zto_AX	0.5563	train	0,1,2,3,5,6,7,8,9	4	-	train	train	train	train	valid	train	train	train	train	train	TM=0.5563>=0.5
+casp15	R1108	medium	2oj3_B	0.5164	train	0,1,2,3,4,5,6,7,9	8	-	train	train	train	train	train	train	train	train	valid	train	TM=0.5164>=0.5
+casp15	R1116	medium	6jxm_B	0.5420	train	0,1,2,3,4,6,7,8,9	5	-	train	train	train	train	train	valid	train	train	train	train	TM=0.5420>=0.5
+casp16	R1263	high	4xw7_A	0.9299	train	0,1,2,3,4,5,6,8,9	7	-	train	train	train	train	train	train	train	valid	train	train	TM=0.9299>=0.9; full-length BLAST exact match; Needle identity>=95%; effective_identity=1.00>=0.8
+casp16	R1203	medium	6jxm_B	0.5410	train	0,1,2,3,4,6,7,8,9	5	-	train	train	train	train	train	valid	train	train	train	train	TM=0.5410>=0.5; Needle identity=65.6%>=50
+casp16	R1205	medium	7jju_A	0.3946	train	0,1,3,4,5,6,7,8,9	2	-	train	train	valid	train	train	train	train	train	train	train	Needle identity=54.1%>=50
+casp16	R1209	medium	6jq6_U	0.3274	train	0,1,2,3,4,6,7,8,9	5	-	train	train	train	train	train	valid	train	train	train	train	Needle identity=61.8%>=50
+casp16	R1211	medium	6noa_A	0.4429	train	0,1,2,3,4,5,6,7,8	9	-	train	train	train	train	train	train	train	train	train	valid	effective_identity=0.44>=0.3; Needle identity=53.0%>=50
+casp16	R1212	medium	6ny3_B	0.4019	train	0,1,2,3,4,6,7,8,9	5	-	train	train	train	train	train	valid	train	train	train	train	Needle identity=51.5%>=50
+casp16	R1261	medium	6wzr_A	0.5950	train	0,1,2,3,4,5,7,8,9	6	-	train	train	train	train	train	train	valid	train	train	train	TM=0.5950>=0.5; Needle identity=62.2%>=50
+casp16	R1262	medium	4znp_A	0.5899	train	1,2,3,4,5,6,7,8,9	0	-	valid	train	train	train	train	train	train	train	train	train	TM=0.5899>=0.5; Needle identity=64.4%>=50

@@ -1,0 +1,9 @@
+subset	note	model	n_total	n_rna_benchmark	n_casp16	rmsd	tm_score	gdt_ts	lddt	clash_score
+full_common	共同成功样本，不做清洗	diffold	55	43	12	2.364909	0.570431	0.520225	0.839692	0.003737
+full_common	共同成功样本，不做清洗	rhofold	55	43	12	3.851091	0.309128	0.313158	0.806233	0.007867
+drop_high_only	Conservative clean，只去掉 high-risk	diffold	51	40	11	2.349020	0.584517	0.528678	0.842581	0.003829
+drop_high_only	Conservative clean，只去掉 high-risk	rhofold	51	40	11	3.999020	0.287013	0.300390	0.796935	0.007888
+drop_fold3_train_suspects	去掉 fold-3 直接训练泄露嫌疑（high+medium）	diffold	41	36	5	2.287317	0.584089	0.510620	0.873400	0.003478
+drop_fold3_train_suspects	去掉 fold-3 直接训练泄露嫌疑（high+medium）	rhofold	41	36	5	4.145610	0.255666	0.243632	0.789804	0.007456
+drop_all_high_medium	Strict clean，去掉全部 high+medium	diffold	39	34	5	2.311538	0.588862	0.515679	0.867607	0.003527
+drop_all_high_medium	Strict clean，去掉全部 high+medium	rhofold	39	34	5	4.292564	0.232673	0.236623	0.779763	0.007409

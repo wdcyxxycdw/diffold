@@ -1,0 +1,64 @@
+dataset	base_id	risk	reason	closest_train	max_tm	conservative_clean	strict_clean
+RNA-benchmark	7UCR	high	TM=0.9512>=0.9	7jjd_A	0.9512	drop	drop
+RNA-benchmark	7UGA	high	TM=1.0000>=0.9; full-length BLAST exact match	7uga_A	1.0000	drop	drop
+RNA-benchmark	8VPV	high	TM=0.9386>=0.9	4rzd_A	0.9386	drop	drop
+RNA-benchmark	7SHX	low	TM=0.3061>=0.3	5m73_A	0.3061	keep	keep
+RNA-benchmark	7UMC	low	TM=0.4188>=0.3	1x8w_C	0.4188	keep	keep
+RNA-benchmark	7UMD	low	TM=0.3546>=0.3	3j6x_5S	0.3546	keep	keep
+RNA-benchmark	7V06	low	TM=0.4690>=0.3	6wlt_A	0.4690	keep	keep
+RNA-benchmark	7WIA	low	TM=0.4901>=0.3	3slm_B	0.4901	keep	keep
+RNA-benchmark	8BTZ	low	TM=0.3068>=0.3	7sam_A	0.3068	keep	keep
+RNA-benchmark	8BWT	low	TM=0.3311>=0.3	1mji_D	0.3311	keep	keep
+RNA-benchmark	8CLR	low	TM=0.4405>=0.3	5uyp_W	0.4405	keep	keep
+RNA-benchmark	8CQ1	low	TM=0.4767>=0.3	3j45_5	0.4767	keep	keep
+RNA-benchmark	8ITS	low	TM=0.3624>=0.3	6cc3_A	0.3624	keep	keep
+RNA-benchmark	8JHP	low	TM=0.3061>=0.3	5mq0_5	0.3061	keep	keep
+RNA-benchmark	8QO3	low	TM=0.4036>=0.3	7eld_B	0.4036	keep	keep
+RNA-benchmark	8QO4	low	TM=0.3871>=0.3	7qwq_1	0.3871	keep	keep
+RNA-benchmark	8SCH	low	TM=0.3911>=0.3	3bo3_B	0.3911	keep	keep
+RNA-benchmark	8TJU	low	TM=0.3319>=0.3	1x8w_B	0.3319	keep	keep
+RNA-benchmark	8UYE	low	TM=0.3630>=0.3	2qbz_X	0.3630	keep	keep
+RNA-benchmark	8UYS	low	TM=0.3682>=0.3	7mlw_F	0.3682	keep	keep
+RNA-benchmark	8V1H	low	TM=0.4971>=0.3	3adb_C	0.4971	keep	keep
+RNA-benchmark	8VCI	low	TM=0.3583>=0.3	4c4q_N	0.3583	keep	keep
+RNA-benchmark	8XZL	low	TM=0.4439>=0.3	3slm_A	0.4439	keep	keep
+RNA-benchmark	9BUN	low	TM=0.4439>=0.3	3eph_F	0.4439	keep	keep
+RNA-benchmark	9EOW	low	TM=0.3081>=0.3	5uzz_A	0.3081	keep	keep
+RNA-benchmark	7UME	medium	TM=0.5129>=0.5	3w3s_B	0.5129	keep	drop
+RNA-benchmark	8FCS	medium	TM=0.6289>=0.5	7da7_C	0.6289	keep	drop
+RNA-benchmark	8SP9	medium	TM=0.5400>=0.5	6jxm_B	0.5400	keep	drop
+RNA-benchmark	8UPT	medium	TM=0.7443>=0.5	6xzb_g2	0.7443	keep	drop
+RNA-benchmark	8V1I	medium	TM=0.5573>=0.5	1asy_S	0.5573	keep	drop
+RNA-benchmark	8VT5	medium	TM=0.5563>=0.5	6zto_AX	0.5563	keep	drop
+RNA-benchmark	7Q48	minimal	TM=0.2515<0.3 and no strong sequence signal	6c64_A	0.2515	keep	keep
+RNA-benchmark	7QDU	minimal	TM=0.1563<0.3 and no strong sequence signal	7mq9_L2	0.1563	keep	keep
+RNA-benchmark	7SXP	minimal	TM=0.2224<0.3 and no strong sequence signal	6v9b_B	0.2224	keep	keep
+RNA-benchmark	7ZJ5	minimal	TM=0.2250<0.3 and no strong sequence signal	7obq_1	0.2250	keep	keep
+RNA-benchmark	8BU8	minimal	TM=0.2326<0.3 and no strong sequence signal	7obq_1	0.2326	keep	keep
+RNA-benchmark	8I44	minimal	TM=0.2935<0.3 and no strong sequence signal	1ync_A	0.2935	keep	keep
+RNA-benchmark	8K15	minimal	TM=0.2653<0.3 and no strong sequence signal	1grz_B	0.2653	keep	keep
+RNA-benchmark	8Q4O	minimal	TM=0.1884<0.3 and no strong sequence signal	6ugj_A	0.1884	keep	keep
+RNA-benchmark	8QO2	minimal	TM=0.2966<0.3 and no strong sequence signal	1foq_A	0.2966	keep	keep
+RNA-benchmark	8TNS	minimal	TM=0.1872<0.3 and no strong sequence signal	2fqn_A	0.1872	keep	keep
+RNA-benchmark	8TVZ	minimal	TM=0.1975<0.3 and no strong sequence signal	7b0y_a	0.1975	keep	keep
+RNA-benchmark	8UTG	minimal	TM=0.2650<0.3 and no strong sequence signal	6c64_A	0.2650	keep	keep
+casp15	R1107	low	TM=0.4017>=0.3	1drz_B	0.4017	keep	keep
+casp15	R1117	low	TM=0.4468>=0.3	3q51_A	0.4468	keep	keep
+casp15	R1149	low	TM=0.3682>=0.3	7mlw_F	0.3682	keep	keep
+casp15	R1156	low	TM=0.3425>=0.3	1foq_A	0.3425	keep	keep
+casp15	R1108	medium	TM=0.5164>=0.5	2oj3_B	0.5164	keep	drop
+casp15	R1116	medium	TM=0.5420>=0.5	6jxm_B	0.5420	keep	drop
+casp16	R1263	high	TM=0.9299>=0.9; full-length BLAST exact match; Needle identity>=95%; effective_identity=1.00>=0.8	4xw7_A	0.9299	drop	drop
+casp16	R1203	medium	TM=0.5410>=0.5; Needle identity=65.6%>=50	6jxm_B	0.5410	keep	drop
+casp16	R1205	medium	Needle identity=54.1%>=50	7jju_A	0.3946	keep	drop
+casp16	R1209	medium	Needle identity=61.8%>=50	6jq6_U	0.3274	keep	drop
+casp16	R1211	medium	effective_identity=0.44>=0.3; Needle identity=53.0%>=50	6noa_A	0.4429	keep	drop
+casp16	R1212	medium	Needle identity=51.5%>=50	6ny3_B	0.4019	keep	drop
+casp16	R1261	medium	TM=0.5950>=0.5; Needle identity=62.2%>=50	6wzr_A	0.5950	keep	drop
+casp16	R1262	medium	TM=0.5899>=0.5; Needle identity=64.4%>=50	4znp_A	0.5899	keep	drop
+casp16	R1242	minimal	TM=0.2475<0.3 and no strong sequence signal	6wlm_A	0.2475	keep	keep
+casp16	R1283v1	minimal	TM=0.2432<0.3 and no strong sequence signal	4v8m_BE	0.2432	keep	keep
+casp16	R1283v2	minimal	TM=0.2114<0.3 and no strong sequence signal	4c4q_N	0.2114	keep	keep
+casp16	R1283v3	minimal	TM=0.1878<0.3 and no strong sequence signal	4c4q_N	0.1878	keep	keep
+casp16	R1285	minimal	TM=0.2418<0.3 and no strong sequence signal	3dis_A	0.2418	keep	keep
+casp16	R1286	minimal	TM=0.1814<0.3 and no strong sequence signal	4c4q_N	0.1814	keep	keep
